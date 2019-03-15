@@ -86,9 +86,9 @@ class PortfolioSim(object):
         if (self.navs[self.step_count] == 0) | (self.navs[self.step_count] < np.max(self.navs) * 0.9):
             done = True
             winning_reward = -1
-        elif self.step_count == self.steps:
+        elif self.step_count == (self.max_path_length - 1):
             done = True
-            if self.navs[self.step_count - 1] >= (1 + 0.05 * (self.step_count / 250)):      # 1년 5 % 이상 (목표)
+            if self.navs[self.step_count] >= (1 + 0.05 * (self.step_count / 250)):      # 1년 5 % 이상 (목표)
                 winning_reward = 1
             else:
                 winning_reward = -1
@@ -147,7 +147,10 @@ class PortfolioEnv(gym.Env):
         else:
             self.macro_list = []
 
-        self.sim = PortfolioSim(self.asset_list, self.macro_list, steps=250, trading_cost=self.trading_cost)
+        self.sim = PortfolioSim(self.asset_list,
+                                self.macro_list,
+                                max_path_length=self.max_path_length,
+                                trading_cost=self.trading_cost)
 
         self.action_space = gym.spaces.Box(0, 1, shape=(len(self.asset_list), ), dtype=np.float32)
         self.observation_space = gym.spaces.Box(low=-np.inf,
@@ -164,7 +167,7 @@ class PortfolioEnv(gym.Env):
         obs = self._data.iloc[(self.i_step - self.input_window_length):self.i_step]
 
         y1 = np.array(obs.iloc[-1][self.asset_list])
-        reward, done2 = self.sim._step(actions, y1)
+        reward, info, done2 = self.sim._step(actions, y1, np.array(obs.iloc[-1][self.macro_list]))
 
         self.i_step += 1
         self.step_count += 1
