@@ -64,7 +64,7 @@ class PortfolioSim(object):
         else:
             last_pos = self.positions[self.step_count - 1, :]
             last_nav = self.navs[self.step_count - 1]
-            last_asset_nav = self.assets_nav[self.step - 1, :]
+            last_asset_nav = self.assets_nav[self.step_count - 1, :]
 
         self.assets_return_df.loc[self.step_count] = assets_return
         if macros_return is not None:
@@ -79,9 +79,9 @@ class PortfolioSim(object):
         self.costs[self.step_count] = trade_costs_pct
         instant_reward = (np.dot((assets_return + 1.), actions) - 1.) - self.costs[self.step_count]
 
-        if self.step_count != 0:
-            self.navs[self.step_count] = last_nav * (1. + instant_reward)
-            self.stk_nav[self.step_count, :] = last_asset_nav * (1. + assets_return)
+        # if self.step_count != 0:
+        self.navs[self.step_count] = last_nav * (1. + instant_reward)
+        self.assets_nav[self.step_count, :] = last_asset_nav * (1. + assets_return)
 
         if (self.navs[self.step_count] == 0) | (self.navs[self.step_count] < np.max(self.navs) * 0.9):
             done = True
@@ -93,6 +93,7 @@ class PortfolioSim(object):
             else:
                 winning_reward = -1
         else:
+            done = False
             winning_reward = 0
 
         total_reward = 0.1 * instant_reward + 0.9 * winning_reward
@@ -160,32 +161,36 @@ class PortfolioEnv(gym.Env):
 
         self._data = pd.concat([asset_df, macro_df], axis=1)
 
-    def step(self, actions):
-        return self._step(actions)
+    def step(self, action):
+        return self._step(action)
 
-    def _step(self, actions, eps=1e-8):
+    def _step(self, action, eps=1e-8, preprocess=True):
         obs = self._data.iloc[(self.i_step - self.input_window_length):self.i_step]
-
         y1 = np.array(obs.iloc[-1][self.asset_list])
-        reward, info, done2 = self.sim._step(actions, y1, np.array(obs.iloc[-1][self.macro_list]))
 
+        if preprocess:
+            obs = self.preprocess(obs)
+
+        reward, info, done2 = self.sim._step(action.squeeze(), y1, np.array(obs.iloc[-1][self.macro_list]))
+
+        print("{} reward: {} // y1: {} // info: {} // done: {}".format(self.sim.step_count, reward, y1, info, done2))
         self.i_step += 1
-        self.step_count += 1
-        if (self.step_count == self.max_path_length) or (self.i_step == self.len_timeseries) or done2:
+        if (self.i_step == self.len_timeseries) or done2:
             done = True
         else:
             done = False
 
-        return obs, reward, done
+        return obs, reward, info, done
 
     def reset(self, t0=0):
         return self._reset(t0)
 
-    def _reset(self, t0=0):
+    def _reset(self, t0=0, preprocess=True):
         self.i_step = self.input_window_length + t0
         self.sim.reset()
         obs = self._data.iloc[(self.i_step - self.input_window_length):self.i_step]
-
+        if preprocess:
+            obs = self.preprocess(obs)
         self.i_step += 1
         return obs
 
@@ -195,9 +200,14 @@ class PortfolioEnv(gym.Env):
     def _render(self, mode='human', close=False):
         pass
 
+    def preprocess(self, obs):
+        obs_p = (obs + 1).cumprod(axis=0) / (obs.iloc[0] + 1)
+        obs_minmax = (obs_p - obs_p.min(axis=0)) / (obs_p.max(axis=0) - obs_p.min(axis=0))
+        return obs_minmax
+
     @property
     def len_timeseries(self):
-        return len(self.df.index) - self.input_window_length
+        return len(self._data.index) - self.input_window_length
 
     @property
     def step_count(self):

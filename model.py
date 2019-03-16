@@ -29,9 +29,6 @@ class MyModel(RLAlgorithm):
         self.start_itr = start_itr
         self.n_itr = n_itr
 
-    def obtain_samples(self, itr):
-
-
     def train(self):
         with tf.Session() as sess:
             self.init_opt()

@@ -1,87 +1,152 @@
+
+import numpy as np
+import pandas as pd
 import tensorflow as tf
 
-from tensorflow.contrib.layers.python import layers as tf_layers
+from tensorflow.keras import Model
+from tensorflow.keras.layers import Dense, Flatten, Conv2D, Reshape, BatchNormalization, ReLU
 
+class ActionNetwork(Model):
+    def __init__(self, env, dim_hidden=[64]):
+        super(ActionNetwork, self).__init__()
+        self.dim_hidden = dim_hidden
 
-def normalize(inputs, activation, reuse, scope):
-    if args.norm == 'batch_norm':
-        return tf_layers.batch_norm(inputs, activation_fn=activation, reuse=reuse, scope=scope)
-    elif args.norm == 'layer_norm':
-        return tf_layers.layer_norm(inputs, activation_fn=activation, reuse=reuse, scope=scope)
-    elif args.norm == 'None':
-        if activation is not None:
-            return activation(inputs)
-        else:
-            return inputs
+        self.dim_input = list(env.observation_space.shape)
+        self.dim_output = env.action_space.shape[0]
+
+        # feature extraction
+        self.reshape = Reshape(self.dim_input + [1])
+        self.batch_norm = BatchNormalization()
+        self.relu = ReLU()
+        self.flatten = Flatten()
+
+        self.hidden_layer = dict()
+        for i, dim_h in enumerate(dim_hidden):
+            self.hidden_layer['h' + str(i + 1)] = Dense(dim_h, activation='relu')
+
+        self.output_layer = Dense(self.dim_output, activation='sigmoid')
+
+    def build_convnet(self, x, len_filter=20):
+        self.conv1 = Conv2D(8, (len_filter, 1), dtype=tf.float32, padding='same')
+        self.conv2 = Conv2D(4, (self.dim_input[0], 1), dtype=tf.float32)
+        x = self.conv1(x)
+        x = self.batch_norm(x)
+        # x = self.relu(x)
+        x = self.conv2(x)
+        x = self.batch_norm(x)
+        x = self.relu(x)
+        x = self.flatten(x)
+
+        return x
+
+    def call(self, x):
+        x = tf.cast(x, tf.float32)
+        x = self.reshape(x)
+
+        x_20 = self.build_convnet(x, 20)
+        x_60 = self.build_convnet(x, 60)
+
+        x = tf.concat([x_20, x_60], axis=1)
+        for i in range(len(self.dim_hidden)):
+            x = self.hidden_layer['h' + str(i + 1)](x)
+
+        return self.output_layer(x)
 
 
 class MyPolicy:
     def __init__(self, env, dim_hidden=[64]):
-        self.dim_input = env.observation_space.shape
-        self.dim_output = env.action_space.shape
-
-        self.dim_hidden = dim_hidden
-        self.num_layers = len(dim_hidden) + 1
-
-    def construct_weights(self, scope_nm=None):
-        if scope_nm is not None:
-            with tf.variable_scope(scope_nm):
-                weights = {}
-                weights['w1'] = tf.Variable(tf.truncated_normal([self.dim_input, self.dim_hidden[0]], stddev=0.01))
-                weights['b1'] = tf.Variable(tf.zeros([self.dim_hidden[0]]))
-                for i in range(1, len(self.dim_hidden)):
-                    weights['w' + str(i + 1)] = tf.Variable(
-                        tf.truncated_normal([self.dim_hidden[i - 1], self.dim_hidden[i]], stddev=0.01))
-                    weights['b' + str(i + 1)] = tf.Variable(tf.zeros([self.dim_hidden[i]]))
-                weights['w' + str(len(self.dim_hidden) + 1)] = tf.Variable(
-                    tf.truncated_normal([self.dim_hidden[-1], self.dim_output], stddev=0.01))
-                weights['b' + str(len(self.dim_hidden) + 1)] = tf.Variable(tf.zeros([self.dim_output]))
-        return weights
-
-    def forward(self, input_data, weights, reuse=False):
-        input_data = tf.reshape(input_data, [-1, self.dim_input])
-        hidden = normalize(tf.matmul(input_data, weights['w1']) + weights['b1'], activation=tf.nn.relu, reuse=reuse,
-                           scope='0')
-        for i in range(1, len(self.dim_hidden)):
-            hidden = normalize(tf.matmul(hidden, weights['w' + str(i + 1)]) + weights['b' + str(i + 1)],
-                               activation=tf.nn.relu, reuse=reuse, scope=str(i + 1))
-        out = tf.matmul(hidden, weights['w' + str(len(self.dim_hidden) + 1)]) + weights[
-            'b' + str(len(self.dim_hidden) + 1)]
-        return out
+        self.action_net = ActionNetwork(env, dim_hidden)
 
     def get_action(self, observation):
-        raise NotImplementedError
+        if isinstance(observation, pd.DataFrame):
+            observation = observation.values
+        if len(observation.shape) == 2:
+            observation = np.expand_dims(observation, 0)
+        action = self.action_net(observation).numpy()
+        return self.value_to_weight(action)
 
     def get_actions(self, observations):
-        raise NotImplementedError
+        if isinstance(observations, pd.DataFrame):
+            observations = observations.values
+
+        assert len(observations.shape) == 3, "value of first dim should be batch size"
+        actions = self.action_net(observations).numpy()
+        return self.value_to_weight(actions)
+
+    def value_to_weight(self, actions):
+        return actions / np.sum(actions, axis=1)
+
+# class Example(Model):
+#     def __init__(self):
+#         super().__init__()
+#         self.d1 = Dense(3, activation='relu')
+#
+#     def call(self, x):
+#         return self.d1(x)
+#
+# x = tf.cast(np.array([[1, 2, 3, 4]]), tf.float32)
+# model = Example()
+# y = model(x)
+
+# class MyPolicy(Model):
+#     def __init__(self, env, dim_hidden=[64]):
+#         super(MyPolicy, self).__init__()
+#         self.conv1 = Conv2D()
+#         self.dim_input = env.observation_space.shape
+#         self.dim_output = env.action_space.shape
+#
+#         self.dim_hidden = dim_hidden
+#         self.num_layers = len(dim_hidden) + 1
+#
+#         self.o_shared = self._build_shared_net(obs, 'o_shared', True)
+#         self.network_a = self._build_a(self.o_shared, 'network_a', True)
+#
+#     def construct_weights(self, scope):
+#         with tf.variable_scope(scope, reuse=tf.AUTO_REUSE):
+#             weights = {}
+#             weights['w1'] = tf.get_variable('w1', shape=[self.dim_input, self.dim_hidden[0]], initializer=tf.initializers.glorot_normal)
+#             weights['b1'] = tf.Variable(tf.zeros([self.dim_hidden[0]]))
+#             for i in range(1, len(self.dim_hidden)):
+#                 weights['w' + str(i + 1)] = tf.Variable(
+#                     tf.truncated_normal([self.dim_hidden[i - 1], self.dim_hidden[i]], stddev=0.01))
+#                 weights['b' + str(i + 1)] = tf.Variable(tf.zeros([self.dim_hidden[i]]))
+#             weights['w' + str(len(self.dim_hidden) + 1)] = tf.Variable(
+#                 tf.truncated_normal([self.dim_hidden[-1], self.dim_output], stddev=0.01))
+#             weights['b' + str(len(self.dim_hidden) + 1)] = tf.Variable(tf.zeros([self.dim_output]))
+#         return weights
+#
+#     def _build_shared_net(self, obs, scope, trainable):
+#         with tf.variable_scope(scope, reuse=tf.AUTO_REUSE):
+#             obs_reshaped = tf.reshape(obs, [-1] + self.s_dim + [1])
+#             x = tf.layers.conv2d(obs_reshaped, filters=10, kernel_size=(20, 1), trainable=trainable)
+#             x = tf.layers.batch_normalization(x)
+#             x = tf.nn.relu(x)
+#             x = tf.layers.conv2d(x, filters=10, kernel_size=(1, 1), trainable=trainable)
+#             x = tf.layers.batch_normalization(x)
+#             x = tf.nn.relu(x)
+#             flattened_obs = tf.layers.flatten(x)
+#
+#             return flattened_obs
+#
+#     def _build_a(self, o_shared, scope, trainable):
+#         with tf.variable_scope(scope, reuse=tf.AUTO_REUSE):
+#             x = tf.layers.dense(o_shared, 64, activation=tf.nn.relu, trainable=trainable)
+#             x = tf.layers.dense(x, 32, activation=tf.nn.relu, trainable=trainable)
+#             a = tf.layers.dense(x, self.a_dim, activation=tf.nn.softmax,
+#                                 kernel_initializer=tf.random_uniform_initializer(-0.003, 0.003, seed=None),
+#                                 trainable=trainable)
+#
+#             return tf.multiply(a, self.a_bound, name='scaled_a')
+#
+#     def get_action(self, observation):
+#         sess = tf.get_default_graph()
+#         action = sess.run(self.network_a, feed_dict={observation})
+#         return action
+#
+#     def get_actions(self, observations):
+#         raise NotImplementedError
 
 
-class Memory(object):
-    def __init__(self, memory_size):
-        self.memory_size = memory_size
-        self.memory_counter = 0
-        self.memory = deque()
-
-    def add(self, s, a, r, s_, done):
-        experience = (s, a, r, s_, done)
-        if self.memory_counter < self.memory_size:
-            self.memory.append(experience)
-            self.memory_counter += 1
-        else:
-            self.memory.popleft()
-            self.memory.append(experience)
-
-    def clear(self):
-        self.memory.clear()
-        self.memory_counter = 0
-
-    def sample_batch(self, batch_size):
-        if self.memory_counter < batch_size:
-            print('insufficient memory')
-            return random.sample(self.memory, self.memory_counter)
-            # return False
-        else:
-            return random.sample(self.memory, batch_size)
 
 
 class DDPG(object):

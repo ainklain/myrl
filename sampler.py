@@ -1,4 +1,3 @@
-
 import numpy as np
 
 
@@ -23,18 +22,41 @@ def dateadd(base_d, freq_='D', added_nums=0):
 
 
 class EnvSampler(object):
-    def __init__(self, env, policy, memory):
+    def __init__(self, env, memory):
         self.env = env
-        self.policy = policy
         self.memory = memory
 
-    def sample_trajectory(self, policy, params=None, gamma=0.95):
+    def sample_trajectory(self, policy, t0, action_noise=None):
+        done = False
+        trajectory = list()
+        obs = self.env.reset(t0)
+        _i = 0
+        while not done:
+            action = policy.get_action(obs)
+            if action_noise is not None:
+                action = action + action_noise()
 
+            obs_, reward, info, done = self.env.step(action)
 
-    def sample_envs(self, base_d, num_envs):
-        date_ = dateadd(base_d, 'm', -1)
-        idx_ = self.envs_list.index(date_)
-        # envs = random.sample(self.envs_list[:idx_], num_envs)
-        envs = np.random.choice(self.envs_list[:idx_], size=num_envs, replace=False)
+            trajectory.append([obs, action, reward, obs_])
+
+            # print(_i, info, done)
+            _i += 1
+            if _i >= 1000:
+                print("failed. (infinite loop)")
+                break
+
+        return trajectory
+
+    def sample_envs(self, i_base_step, num_envs):
+        idx_ = i_base_step + self.env.input_window_length - self.env.max_path_length
+        envs = np.random.choice(np.arange(idx_), size=num_envs, replace=True)
         return envs
 
+    def sample_envs_by_date(self, base_d, num_envs):
+        date_ = dateadd(base_d, 'm', -1)
+        idx_ = list(self.env._data.index).index(date_)
+
+        # envs = np.random.choice(self.envs_list[:idx_], size=num_envs, replace=False)
+        envs = np.random.choice(np.arange(idx_), size=num_envs, replace=True)
+        return envs

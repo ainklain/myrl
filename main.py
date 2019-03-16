@@ -1,12 +1,13 @@
-from baseline import MyBaseline
+# from baseline import MyBaseline
 from environment import PortfolioEnv
 from policy import MyPolicy
-from model import MyModel
+# from model import MyModel
 from sampler import EnvSampler
+from ou import OrnsteinUhlenbeck
+from memory import Memory
 
 import numpy as np
 import pandas as pd
-import tensorflow as tf
 
 
 class Argument:
@@ -23,28 +24,33 @@ def main():
     env = PortfolioEnv()
 
     policy = MyPolicy(
-        name='policy',
-        env_spec=env.spec,
+        # name='policy',
+        env=env,
         dim_hidden=args.dim_hidden)
 
-    memory = MyMemory()
+    memory = Memory(100)
 
-    sampler = EnvSampler(env, policy, memory)
+    action_noise = OrnsteinUhlenbeck(0)
 
-    baseline = MyBaseline(env_spec=env.spec)
 
-    model = MyModel(
-        env=env,
-        policy=policy,
-        baseline=baseline,
-        batch_size=args.batch_size,
-        max_path_length=args.max_path_length,
-        n_itr=args.n_itr)
+    sampler = EnvSampler(env, memory)
 
-    for t in range(env.len_timeseries):
-        if t % 20 == 0:
+    tr = sampler.sample_trajectory(policy, 0)
 
-        model.train()
+    # baseline = MyBaseline(env_spec=env.spec)
+    #
+    # model = MyModel(
+    #     env=env,
+    #     policy=policy,
+    #     baseline=baseline,
+    #     batch_size=args.batch_size,
+    #     max_path_length=args.max_path_length,
+    #     n_itr=args.n_itr)
+    #
+    # for t in range(env.len_timeseries):
+    #     if t % 20 == 0:
+    #
+    #     model.train()
 
 
 
