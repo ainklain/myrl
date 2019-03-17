@@ -38,7 +38,7 @@ class EnvSampler(object):
 
             obs_, reward, info, done = self.env.step(action)
 
-            trajectory.append([obs, action, reward, obs_])
+            trajectory.append({'obs': obs, 'action': action, 'reward': reward, 'obs_': obs_})
 
             # print(_i, info, done)
             _i += 1
@@ -48,10 +48,13 @@ class EnvSampler(object):
 
         return trajectory
 
-    def sample_envs(self, i_base_step, num_envs):
-        idx_ = i_base_step + self.env.input_window_length - self.env.max_path_length
-        envs = np.random.choice(np.arange(idx_), size=num_envs, replace=True)
-        return envs
+    def sample_envs(self, num_envs):
+        return self.memory.sample_batch(num_envs)
+
+    # def sample_envs(self, i_base_step, num_envs):
+    #     idx_ = i_base_step + self.env.input_window_length - self.env.max_path_length
+    #     envs = np.random.choice(np.arange(idx_), size=num_envs, replace=True)
+    #     return envs
 
     def sample_envs_by_date(self, base_d, num_envs):
         date_ = dateadd(base_d, 'm', -1)

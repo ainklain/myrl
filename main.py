@@ -16,6 +16,10 @@ class Argument:
         self.batch_size = 100
         self.max_path_length = 250
         self.n_itr = 10
+        self.num_envs = 8
+        self.M = 60
+        self.K = 20
+
 
 
 def main():
@@ -23,19 +27,33 @@ def main():
 
     env = PortfolioEnv()
 
-    policy = MyPolicy(
-        # name='policy',
-        env=env,
-        dim_hidden=args.dim_hidden)
+    policy = MyPolicy(env=env, dim_hidden=args.dim_hidden)
 
-    memory = Memory(100)
+    memory = Memory(1000)
 
     action_noise = OrnsteinUhlenbeck(0)
 
-
     sampler = EnvSampler(env, memory)
 
-    tr = sampler.sample_trajectory(policy, 0)
+    for t in range(env.len_timeseries):
+        env_samples = sampler.sample_envs(args.num_envs)
+
+        if (t % 5 == 0) or (t < memory.memory_size):
+            tr = sampler.sample_trajectory(policy, t)
+            memory.add(tr)
+            if t <= args.M:
+                continue
+
+        policy_ori = policy.action_net.get_weights()
+
+        for trajectory in env_samples:
+
+
+
+
+
+            model.train()
+
 
     # baseline = MyBaseline(env_spec=env.spec)
     #
@@ -47,10 +65,6 @@ def main():
     #     max_path_length=args.max_path_length,
     #     n_itr=args.n_itr)
     #
-    # for t in range(env.len_timeseries):
-    #     if t % 20 == 0:
-    #
-    #     model.train()
 
 
 

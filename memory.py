@@ -9,14 +9,14 @@ class Memory(object):
         self.memory_counter = 0
         self.memory = deque()
 
-    def add(self, s, a, r, s_, done):
-        experience = (s, a, r, s_, done)
+    def add(self, trajectory):
+
         if self.memory_counter < self.memory_size:
-            self.memory.append(experience)
+            self.memory.append(trajectory)
             self.memory_counter += 1
         else:
             self.memory.popleft()
-            self.memory.append(experience)
+            self.memory.append(trajectory)
 
     def clear(self):
         self.memory.clear()

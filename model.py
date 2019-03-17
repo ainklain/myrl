@@ -30,22 +30,5 @@ class MyModel(RLAlgorithm):
         self.n_itr = n_itr
 
     def train(self):
-        with tf.Session() as sess:
-            self.init_opt()
-            uninit_vars = []
-            for var in tf.all_variables():
-                try:
-                    sess.run(var)
-                except tf.errors.FailedPreconditionError:
-                    uninit_vars.append(var)
-            sess.run(tf.initialize_variables(uninit_vars))
-            start_time = time.time()
-            env = self.env
-
-    def init_opt(self):
-
-
-        raise NotImplementedError
-
 
 
