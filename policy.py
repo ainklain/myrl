@@ -46,17 +46,18 @@ class SharedNetwork(Model):
 class ActorNetwork(Model):
     def __init__(self, env, dim_hidden=[64, 32, 16]):
         super(ActorNetwork, self).__init__()
+        self.shared_net = SharedNetwork(env)
         self.dim_hidden = dim_hidden
 
-        self.dim_output = env.action_space.shape[0]
         self.hidden_layer = dict()
         for i, dim_h in enumerate(dim_hidden):
             self.hidden_layer['h' + str(i + 1)] = Dense(dim_h, activation='relu')
 
-        self.output_layer = Dense(self.dim_output, activation='sigmoid')
+        dim_output = self.shared_net.dim_output
+        self.output_layer = Dense(dim_output, activation='sigmoid')
 
-    def call(self, x, shared_network):
-        x = shared_network(x)
+    def call(self, x):
+        x = self.shared_net(x)
         for i in range(len(self.dim_hidden)):
             x = self.hidden_layer['h' + str(i + 1)](x)
         x = self.output_layer(x)
@@ -66,7 +67,6 @@ class ActorNetwork(Model):
 class CriticNetwork(Model):
     def __init__(self, env, dim_hidden=[32, 16]):
         super(CriticNetwork, self).__init__(env)
-
         self.dim_hidden = dim_hidden
 
         self.hidden_layer = dict()
@@ -75,8 +75,8 @@ class CriticNetwork(Model):
 
         self.output_layer = Dense(1, activation='linear')
 
-    def call(self, x, shared_network, actor_network):
-        x = tf.concat([shared_network(x), actor_network(x, shared_network)], axis=1)
+    def call(self, x, actor_network):
+        x = tf.concat([actor_network.shared_net(x), actor_network(x)], axis=1)
         for i in range(len(self.dim_hidden)):
             x = self.hidden_layer['h' + str(i + 1)](x)
 
@@ -84,7 +84,8 @@ class CriticNetwork(Model):
 
 
 class MetaDDPG:
-    def __init__(self, env, dim_hidden_a=[64, 32, 16], dim_hidden_c=[32, 16]):
+    def __init__(self, env, gamma=0.99, dim_hidden_a=[64, 32, 16], dim_hidden_c=[32, 16]):
+        self.gamma = gamma
         self.actor_net = ActorNetwork(env=env, dim_hidden=dim_hidden_a)
         self.critic_net = CriticNetwork(env=env, dim_hidden=dim_hidden_c)
 
@@ -99,11 +100,25 @@ class MetaDDPG:
         params_estimate = self.actor_net.get_weights() + self.critic_net.get_weights()
         params_target = self.target_actor_net.get_weights() + self.target_critic_net.get_weights()
 
-
     def grad_loss(self, trajectory):
+        train_loss = tf.keras.metrics.Mean(name='train_loss')
+
         random.shuffle(trajectory)
         for transition in trajectory:
             o, a, r, o_ = transition['obs'], transition['action'], transition['reward'], transition['obs_']
+            q_target = r + self.gamma * self.target_critic_net(o_, self.target_actor_net(o_))
+            loss_c_object = tf.keras.losses.MeanSquaredError()
+
+            with tf.GradientTape() as tape:
+                q_pred = self.critic_net(o, self.actor_net)
+                loss_c = loss_c_object(q_target, q_pred)
+                loss_a = -tf.reduce_mean(q_pred)
+            grad_loss_c = tape.gradient(loss_c, self.critic_net.trainable_variables)
+            grad_loss_a = tape.gradient(loss_a, self.actor_net.trainable_variables)
+
+
+
+            optimizer.
 
 
 
@@ -128,8 +143,8 @@ class MetaDDPG:
 
 
 class MyPolicy:
-    def __init__(self, env, dim_hidden_a=[64, 32, 16], dim_hidden_c=[32, 16]):
-        self.action_net = ActorNetwork(env, dim_hidden_a)
+    def __init__(self, env, dim_hidden=[64, 32, 16]):
+        self.action_net = ActorNetwork(env, dim_hidden)
 
     def get_action(self, observation):
         if isinstance(observation, pd.DataFrame):
