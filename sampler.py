@@ -26,7 +26,7 @@ class EnvSampler(object):
         self.env = env
         self.memory = memory
 
-    def sample_trajectory(self, policy, t0, action_noise=None):
+    def sample_trajectory(self, policy, t0, t_length, action_noise=None):
         done = False
         trajectory = list()
         obs = self.env.reset(t0)
@@ -42,8 +42,7 @@ class EnvSampler(object):
 
             # print(_i, info, done)
             _i += 1
-            if _i >= 1000:
-                print("failed. (infinite loop)")
+            if _i >= t_length:
                 break
 
         return trajectory

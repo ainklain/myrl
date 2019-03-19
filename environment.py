@@ -83,15 +83,26 @@ class PortfolioSim(object):
         self.navs[self.step_count] = last_nav * (1. + instant_reward)
         self.assets_nav[self.step_count, :] = last_asset_nav * (1. + assets_return)
 
-        if (self.navs[self.step_count] == 0) | (self.navs[self.step_count] < np.max(self.navs) * 0.9):
+        if (self.navs[self.step_count] == 0):       # 파산
             done = True
             winning_reward = -1
-        elif self.step_count == (self.max_path_length - 1):
+        elif self.step_count == (self.max_path_length - 1):         # 최대 기간 도달
             done = True
             if self.navs[self.step_count] >= (1 + 0.05 * (self.step_count / 250)):      # 1년 5 % 이상 (목표)
                 winning_reward = 1
             else:
                 winning_reward = -1
+        elif (self.navs[self.step_count] < np.max(self.navs) * 0.9):        # MDD -10% 초과시 패널티
+            done = False
+            winning_reward = self.navs[self.step_count] / np.max(self.navs) * 0.9 - 1.
+        elif self.step_count % (self.max_path_length - 1) == 20:            # 월별 목표 달성시 reward/ 손실 발생시 penalty
+            done = False
+            if self.navs[self.step_count] >= (1 + 0.05 * (self.step_count / 250)):
+                winning_reward = self.navs[self.step_count] / (1 + 0.05 * (self.step_count / 250)) - 1.
+            elif self.navs[self.step_count] >= 1:
+                winning_reward = 0
+            else:
+                winning_reward = self.navs[self.step_count] - 1.
         else:
             done = False
             winning_reward = 0
@@ -126,7 +137,7 @@ class PortfolioEnv(gym.Env):
     def __init__(self,
                  trading_cost=0.0020,
                  input_window_length=250,
-                 max_path_length=20,
+                 max_path_length=120,
                  is_training=True):
         super().__init__()
         self.input_window_length = input_window_length

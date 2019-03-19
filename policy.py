@@ -1,30 +1,22 @@
 
 import numpy as np
 import pandas as pd
+import random
 import tensorflow as tf
 
 from tensorflow.keras import Model
 from tensorflow.keras.layers import Dense, Flatten, Conv2D, Reshape, BatchNormalization, ReLU
 
-class ActionNetwork(Model):
-    def __init__(self, env, dim_hidden=[64]):
-        super(ActionNetwork, self).__init__()
-        self.dim_hidden = dim_hidden
-
+class SharedNetwork(Model):
+    def __init__(self, env):
+        super(SharedNetwork, self).__init__()
         self.dim_input = list(env.observation_space.shape)
         self.dim_output = env.action_space.shape[0]
-
-        # feature extraction
         self.reshape = Reshape(self.dim_input + [1])
-        self.batch_norm = BatchNormalization()
+
         self.relu = ReLU()
         self.flatten = Flatten()
-
-        self.hidden_layer = dict()
-        for i, dim_h in enumerate(dim_hidden):
-            self.hidden_layer['h' + str(i + 1)] = Dense(dim_h, activation='relu')
-
-        self.output_layer = Dense(self.dim_output, activation='sigmoid')
+        self.batch_norm = BatchNormalization()
 
     def build_convnet(self, x, len_filter=20):
         self.conv1 = Conv2D(8, (len_filter, 1), dtype=tf.float32, padding='same')
@@ -47,15 +39,97 @@ class ActionNetwork(Model):
         x_60 = self.build_convnet(x, 60)
 
         x = tf.concat([x_20, x_60], axis=1)
+
+        return x
+
+
+class ActorNetwork(Model):
+    def __init__(self, env, dim_hidden=[64, 32, 16]):
+        super(ActorNetwork, self).__init__()
+        self.dim_hidden = dim_hidden
+
+        self.dim_output = env.action_space.shape[0]
+        self.hidden_layer = dict()
+        for i, dim_h in enumerate(dim_hidden):
+            self.hidden_layer['h' + str(i + 1)] = Dense(dim_h, activation='relu')
+
+        self.output_layer = Dense(self.dim_output, activation='sigmoid')
+
+    def call(self, x, shared_network):
+        x = shared_network(x)
+        for i in range(len(self.dim_hidden)):
+            x = self.hidden_layer['h' + str(i + 1)](x)
+        x = self.output_layer(x)
+        return x / tf.reduce_sum(x, axis=1)
+
+
+class CriticNetwork(Model):
+    def __init__(self, env, dim_hidden=[32, 16]):
+        super(CriticNetwork, self).__init__(env)
+
+        self.dim_hidden = dim_hidden
+
+        self.hidden_layer = dict()
+        for i, dim_h in enumerate(dim_hidden):
+            self.hidden_layer['h' + str(i + 1)] = Dense(dim_h, activation='relu')
+
+        self.output_layer = Dense(1, activation='linear')
+
+    def call(self, x, shared_network, actor_network):
+        x = tf.concat([shared_network(x), actor_network(x, shared_network)], axis=1)
         for i in range(len(self.dim_hidden)):
             x = self.hidden_layer['h' + str(i + 1)](x)
 
         return self.output_layer(x)
 
 
+class MetaDDPG:
+    def __init__(self, env, dim_hidden_a=[64, 32, 16], dim_hidden_c=[32, 16]):
+        self.actor_net = ActorNetwork(env=env, dim_hidden=dim_hidden_a)
+        self.critic_net = CriticNetwork(env=env, dim_hidden=dim_hidden_c)
+
+        self.target_actor_net = ActorNetwork(env=env, dim_hidden=dim_hidden_a)
+        self.target_critic_net = CriticNetwork(env=env, dim_hidden=dim_hidden_c)
+
+
+        self.target_actor_net.set_weights(self.actor_net.get_weights())
+        self.target_critic_net.set_weights(self.critic_net.get_weights())
+
+    def soft_replace(self):
+        params_estimate = self.actor_net.get_weights() + self.critic_net.get_weights()
+        params_target = self.target_actor_net.get_weights() + self.target_critic_net.get_weights()
+
+
+    def grad_loss(self, trajectory):
+        random.shuffle(trajectory)
+        for transition in trajectory:
+            o, a, r, o_ = transition['obs'], transition['action'], transition['reward'], transition['obs_']
+
+
+
+
+
+
+    def get_action(self, observation):
+        if isinstance(observation, pd.DataFrame):
+            observation = observation.values
+        if len(observation.shape) == 2:
+            observation = np.expand_dims(observation, 0)
+
+        return self.actor_net(observation).numpy()
+
+    def get_actions(self, observations):
+        if isinstance(observations, pd.DataFrame):
+            observations = observations.values
+
+        assert len(observations.shape) == 3, "value of first dim should be batch size"
+        return self.actor_net(observations).numpy()
+
+
+
 class MyPolicy:
-    def __init__(self, env, dim_hidden=[64]):
-        self.action_net = ActionNetwork(env, dim_hidden)
+    def __init__(self, env, dim_hidden_a=[64, 32, 16], dim_hidden_c=[32, 16]):
+        self.action_net = ActorNetwork(env, dim_hidden_a)
 
     def get_action(self, observation):
         if isinstance(observation, pd.DataFrame):
@@ -75,6 +149,11 @@ class MyPolicy:
 
     def value_to_weight(self, actions):
         return actions / np.sum(actions, axis=1)
+
+
+
+
+
 
 # class Example(Model):
 #     def __init__(self):

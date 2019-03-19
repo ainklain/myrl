@@ -31,22 +31,22 @@ def main():
 
     memory = Memory(1000)
 
-    action_noise = OrnsteinUhlenbeck(0)
-
     sampler = EnvSampler(env, memory)
 
     for t in range(env.len_timeseries):
         env_samples = sampler.sample_envs(args.num_envs)
-
+        action_noise = OrnsteinUhlenbeck(mu=np.zeros(env.action_space.shape))
         if (t % 5 == 0) or (t < memory.memory_size):
-            tr = sampler.sample_trajectory(policy, t)
+            policy_ori = policy.action_net.get_weights()
+            tr = sampler.sample_trajectory(policy, t - args.M, args.M, action_noise=action_noise)
+
             memory.add(tr)
             if t <= args.M:
                 continue
 
-        policy_ori = policy.action_net.get_weights()
 
         for trajectory in env_samples:
+
 
 
 
