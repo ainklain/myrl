@@ -7,6 +7,7 @@ import tensorflow as tf
 from tensorflow.keras import Model
 from tensorflow.keras.layers import Dense, Flatten, Conv2D, Reshape, BatchNormalization, ReLU
 
+
 class SharedNetwork(Model):
     def __init__(self, env):
         super(SharedNetwork, self).__init__()
@@ -92,7 +93,6 @@ class MetaDDPG:
         self.target_actor_net = ActorNetwork(env=env, dim_hidden=dim_hidden_a)
         self.target_critic_net = CriticNetwork(env=env, dim_hidden=dim_hidden_c)
 
-
         self.target_actor_net.set_weights(self.actor_net.get_weights())
         self.target_critic_net.set_weights(self.critic_net.get_weights())
 
@@ -100,37 +100,68 @@ class MetaDDPG:
         params_estimate = self.actor_net.get_weights() + self.critic_net.get_weights()
         params_target = self.target_actor_net.get_weights() + self.target_critic_net.get_weights()
 
-    def grad_loss(self, trajectory):
-        train_loss = tf.keras.metrics.Mean(name='train_loss')
+    def train(self, trajectory):
+        loss_c = None
+        loss_a = None
 
         random.shuffle(trajectory)
-        for transition in trajectory:
-            o, a, r, o_ = transition['obs'], transition['action'], transition['reward'], transition['obs_']
-            q_target = r + self.gamma * self.target_critic_net(o_, self.target_actor_net(o_))
-            loss_c_object = tf.keras.losses.MeanSquaredError()
+        with tf.GradientTape() as tape_a:
+            with tf.GradientTape() as tape_c:
+                # tape.watch([self.critic_net.trainable_variables, self.actor_net.trainable_variables])
+                for j, transition in enumerate(trajectory):
+                    o = self.process_obs(transition['obs'])
+                    # a = transition['action']
+                    r = transition['reward']
+                    o_ = self.process_obs(transition['obs_'])
+                    q_target = r + self.gamma * self.target_critic_net(o_, self.target_actor_net)
+                    loss_c_object = tf.keras.losses.MeanSquaredError()
 
-            with tf.GradientTape() as tape:
-                q_pred = self.critic_net(o, self.actor_net)
-                loss_c = loss_c_object(q_target, q_pred)
-                loss_a = -tf.reduce_mean(q_pred)
-            grad_loss_c = tape.gradient(loss_c, self.critic_net.trainable_variables)
-            grad_loss_a = tape.gradient(loss_a, self.actor_net.trainable_variables)
+                    # with tf.GradientTape() as tape:
+                    q_pred = self.critic_net(o, self.actor_net)
+                    if j == 0:
+                        loss_c = loss_c_object(q_target, q_pred) / len(trajectory)
+                        loss_a = -tf.reduce_mean(q_pred) / len(trajectory)
+                    else:
+                        loss_c = loss_c + loss_c_object(q_target, q_pred) / len(trajectory)
+                        loss_a = loss_a - tf.reduce_mean(q_pred) / len(trajectory)
 
+        grad_loss_c = tape_c.gradient(loss_c, self.critic_net.trainable_variables)
+        grad_loss_a = tape_a.gradient(loss_a, self.actor_net.trainable_variables)
 
+        # random.shuffle(trajectory)
+        # total_loss_c = None
+        # for transition in trajectory:
+        #     o = self.process_obs(transition['obs'])
+        #     # a = transition['action']
+        #     r = transition['reward']
+        #     o_ = self.process_obs(transition['obs_'])
+        #     q_target = r + self.gamma * self.target_critic_net(o_, self.target_actor_net)
+        #     loss_c_object = tf.keras.losses.MeanSquaredError()
+        #
+        #     with tf.GradientTape() as tape:
+        #         q_pred = self.critic_net(o, self.actor_net)
+        #         loss_c = loss_c_object(q_target, q_pred)
+        #     grad_loss_c = tape.gradient(loss_c, self.critic_net.trainable_variables)
+        #
+        #     with tf.GradientTape() as tape:
+        #         q_pred = self.critic_net(o, self.actor_net)
+        #         loss_a = -tf.reduce_mean(q_pred)
+        #     grad_loss_a = tape.gradient(loss_a, self.actor_net.trainable_variables)
+        #
+        #     train_loss_a(grad_loss_a)
+        #     train_loss_c(grad_loss_c)
 
-            optimizer.
+        return grad_loss_c, grad_loss_a, loss_c, loss_a
 
-
-
-
-
-
-    def get_action(self, observation):
+    def process_obs(self, observation):
         if isinstance(observation, pd.DataFrame):
             observation = observation.values
         if len(observation.shape) == 2:
             observation = np.expand_dims(observation, 0)
+        return observation
 
+    def get_action(self, observation):
+        observation = self.process_obs(observation)
         return self.actor_net(observation).numpy()
 
     def get_actions(self, observations):
@@ -139,7 +170,6 @@ class MetaDDPG:
 
         assert len(observations.shape) == 3, "value of first dim should be batch size"
         return self.actor_net(observations).numpy()
-
 
 
 class MyPolicy:

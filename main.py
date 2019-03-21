@@ -1,6 +1,6 @@
 # from baseline import MyBaseline
 from environment import PortfolioEnv
-from policy import MyPolicy
+from policy import MyPolicy, MetaDDPG
 # from model import MyModel
 from sampler import EnvSampler
 from ou import OrnsteinUhlenbeck
@@ -12,14 +12,15 @@ import pandas as pd
 
 class Argument:
     def __init__(self):
-        self.dim_hidden = [64, 32, 16]
+        self.dim_hidden_a = [64, 32, 16]
+        self.dim_hidden_c = [32, 16]
         self.batch_size = 100
         self.max_path_length = 250
         self.n_itr = 10
         self.num_envs = 8
         self.M = 60
         self.K = 20
-
+        self.gamma = 0.99
 
 
 def main():
@@ -29,14 +30,15 @@ def main():
 
     policy = MyPolicy(env=env, dim_hidden=args.dim_hidden)
 
+    model = MetaDDPG(env, gamma=args.gamma, dim_hidden_a=args.dim_hidden_a, dim_hidden_c=args.dim_hidden_c)
+
     memory = Memory(1000)
 
     sampler = EnvSampler(env, memory)
 
-    for t in range(env.len_timeseries):
-        env_samples = sampler.sample_envs(args.num_envs)
-        action_noise = OrnsteinUhlenbeck(mu=np.zeros(env.action_space.shape))
+    for t in range(args.M, env.len_timeseries):
         if (t % 5 == 0) or (t < memory.memory_size):
+            action_noise = OrnsteinUhlenbeck(mu=np.zeros(env.action_space.shape))
             policy_ori = policy.action_net.get_weights()
             tr = sampler.sample_trajectory(policy, t - args.M, args.M, action_noise=action_noise)
 
@@ -44,8 +46,8 @@ def main():
             if t <= args.M:
                 continue
 
+        env_samples = sampler.sample_envs(args.num_envs)
 
-        for trajectory in env_samples:
 
 
 
