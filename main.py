@@ -28,7 +28,7 @@ def main():
 
     env = PortfolioEnv()
 
-    policy = MyPolicy(env=env, dim_hidden=args.dim_hidden)
+    # policy = MyPolicy(env=env, dim_hidden=args.dim_hidden)
 
     model = MetaDDPG(env, gamma=args.gamma, dim_hidden_a=args.dim_hidden_a, dim_hidden_c=args.dim_hidden_c)
 
@@ -36,25 +36,27 @@ def main():
 
     sampler = EnvSampler(env, memory)
 
-    for t in range(args.M, env.len_timeseries):
+    for t in range(args.M + args.K, env.len_timeseries):
         if (t % 5 == 0) or (t < memory.memory_size):
             action_noise = OrnsteinUhlenbeck(mu=np.zeros(env.action_space.shape))
             policy_ori = policy.action_net.get_weights()
-            tr = sampler.sample_trajectory(policy, t - args.M, args.M, action_noise=action_noise)
+            tr_support = sampler.sample_trajectory(model, t - args.M, args.M, action_noise=action_noise)
+            tr_target = sampler.sample_trajectory(model, t, args.K, action_noise=action_noise)
 
-            memory.add(tr)
-            if t <= args.M:
-                continue
+            memory.add(t - args.K)
 
         env_samples = sampler.sample_envs(args.num_envs)
 
+        model.metatrain(env_samples)
 
 
 
 
 
 
-            model.train()
+
+
+        model.train()
 
 
     # baseline = MyBaseline(env_spec=env.spec)

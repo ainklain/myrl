@@ -30,8 +30,10 @@ class EnvSampler(object):
         done = False
         trajectory = list()
         obs = self.env.reset(t0)
+
         _i = 0
         while not done:
+
             action = policy.get_action(obs)
             if action_noise is not None:
                 action = action + action_noise()
@@ -42,6 +44,7 @@ class EnvSampler(object):
 
             # print(_i, info, done)
             _i += 1
+            obs = obs_.copy()
             if _i >= t_length:
                 break
 

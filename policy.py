@@ -20,12 +20,12 @@ class SharedNetwork(Model):
         self.batch_norm = BatchNormalization()
 
     def build_convnet(self, x, len_filter=20):
-        self.conv1 = Conv2D(8, (len_filter, 1), dtype=tf.float32, padding='same')
-        self.conv2 = Conv2D(4, (self.dim_input[0], 1), dtype=tf.float32)
-        x = self.conv1(x)
+        conv1 = Conv2D(8, (len_filter, 1), dtype=tf.float32, padding='same')
+        conv2 = Conv2D(4, (self.dim_input[0], 1), dtype=tf.float32)
+        x = conv1(x)
         x = self.batch_norm(x)
         # x = self.relu(x)
-        x = self.conv2(x)
+        x = conv2(x)
         x = self.batch_norm(x)
         x = self.relu(x)
         x = self.flatten(x)
@@ -57,41 +57,54 @@ class ActorNetwork(Model):
         dim_output = self.shared_net.dim_output
         self.output_layer = Dense(dim_output, activation='sigmoid')
 
+    @property
+    def dim_input(self):
+        return self.shared_net.dim_input
+
+    @property
+    def dim_output(self):
+        return self.shared_net.dim_output
+
     def call(self, x):
         x = self.shared_net(x)
         for i in range(len(self.dim_hidden)):
             x = self.hidden_layer['h' + str(i + 1)](x)
         x = self.output_layer(x)
-        return x / tf.reduce_sum(x, axis=1)
+        return x / tf.reduce_sum(x, axis=1, keepdims=True)
 
 
 class CriticNetwork(Model):
-    def __init__(self, env, dim_hidden=[32, 16]):
+    def __init__(self, env, dim_hidden=[32]):
         super(CriticNetwork, self).__init__(env)
         self.dim_hidden = dim_hidden
 
         self.hidden_layer = dict()
         for i, dim_h in enumerate(dim_hidden):
-            self.hidden_layer['h' + str(i + 1)] = Dense(dim_h, activation='relu')
-
+            self.hidden_layer['hs' + str(i + 1)] = Dense(dim_h, activation='linear', use_bias=False)
+            self.hidden_layer['ha' + str(i + 1)] = Dense(dim_h, activation='linear')
+        self.relu = ReLU()
         self.output_layer = Dense(1, activation='linear')
 
-    def call(self, x, actor_network):
-        x = tf.concat([actor_network.shared_net(x), actor_network(x)], axis=1)
+    def call(self, x_processed, action):
         for i in range(len(self.dim_hidden)):
-            x = self.hidden_layer['h' + str(i + 1)](x)
+            x_processed = self.hidden_layer['hs' + str(i + 1)](x_processed)
+            action = self.hidden_layer['ha' + str(i + 1)](action)
+            x = self.relu(tf.math.add(x_processed, action))
 
         return self.output_layer(x)
 
 
 class MetaDDPG:
-    def __init__(self, env, gamma=0.99, dim_hidden_a=[64, 32, 16], dim_hidden_c=[32, 16]):
+    def __init__(self, sampler, args, action_noise=None, gamma=0.99, dim_hidden_a=[64, 32, 16], dim_hidden_c=[32]):
         self.gamma = gamma
-        self.actor_net = ActorNetwork(env=env, dim_hidden=dim_hidden_a)
-        self.critic_net = CriticNetwork(env=env, dim_hidden=dim_hidden_c)
+        self.sampler = sampler
+        self.args = args
+        self.action_noise = action_noise
+        self.actor_net = ActorNetwork(env=sampler.env, dim_hidden=dim_hidden_a)
+        self.critic_net = CriticNetwork(env=sampler.env, dim_hidden=dim_hidden_c)
 
-        self.target_actor_net = ActorNetwork(env=env, dim_hidden=dim_hidden_a)
-        self.target_critic_net = CriticNetwork(env=env, dim_hidden=dim_hidden_c)
+        self.target_actor_net = ActorNetwork(env=sampler.env, dim_hidden=dim_hidden_a)
+        self.target_critic_net = CriticNetwork(env=sampler.env, dim_hidden=dim_hidden_c)
 
         self.target_actor_net.set_weights(self.actor_net.get_weights())
         self.target_critic_net.set_weights(self.critic_net.get_weights())
@@ -100,11 +113,73 @@ class MetaDDPG:
         params_estimate = self.actor_net.get_weights() + self.critic_net.get_weights()
         params_target = self.target_actor_net.get_weights() + self.target_critic_net.get_weights()
 
-    def train(self, trajectory):
-        loss_c = None
-        loss_a = None
+    def _trajectory_to_batch(self, trajectory):
+        o_batch = np.zeros([len(trajectory)] + self.actor_net.dim_input, dtype=np.float32)
+        # a_batch = np.zeros([len(trajectory), self.actor_net.dim_output], dtype=np.float32)
+        r_batch = np.zeros([len(trajectory), 1], dtype=np.float32)
+        o_batch_ = np.zeros_like(o_batch, dtype=np.float32)
 
-        random.shuffle(trajectory)
+        for i, transition in enumerate(trajectory):
+            o_batch[i] = self.process_obs(transition['obs'])
+            # a_batch[i] = transition['action']
+            r_batch[i] = transition['reward']
+            o_batch_[i] = self.process_obs(transition['obs_'])
+
+        return o_batch, r_batch, o_batch_
+
+
+    def get_trajectory(self, env_t, type_='support'):
+        if type_ == 'support':
+            tr = self.sampler.sample_trajectory(self, env_t, self.args.M, action_noise=self.action_noise)
+        elif type_ == 'target':
+            tr = self.sampler.sample_trajectory(self, env_t, self.args.K, action_noise=self.action_noise)
+        else:
+            print('invalid type error.')
+            tr = None
+        return tr
+
+    def train(self, trajectory):
+        loss_c_object = tf.keras.losses.MeanSquaredError()
+
+        optimizer = tf.keras.optimizers.SGD(learning_rate=0.001)
+        # optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
+
+        o_batch, r_batch, o_batch_ = self._trajectory_to_batch(trajectory)
+        o_processed = self.actor_net.shared_net(o_batch).numpy()
+        o_processed_ = self.target_actor_net.shared_net(o_batch_).numpy()
+        with tf.GradientTape() as tape_a:
+            with tf.GradientTape() as tape_c:
+                q_target = r_batch + self.gamma * self.target_critic_net(o_processed_, self.target_actor_net(o_batch_))
+                q_pred = self.critic_net(o_processed, self.actor_net(o_batch))
+
+                loss_c = loss_c_object(q_target, q_pred)
+                loss_a = -tf.reduce_mean(q_pred)
+
+        grad_loss_c = tape_c.gradient(zip(loss_c, self.critic_net.trainable_variables))
+        grad_loss_a = tape_a.gradient(zip(loss_a, self.actor_net.trainable_variables))
+        optimizer.apply_gradients(grad_loss_c)
+        optimizer.apply_gradients(grad_loss_a)
+
+    def metatrain(self, env_samples):
+        meta_loss_c = None
+        meta_loss_a = None
+
+        weight_a = self.actor_net.get_weights()
+        weight_c = self.critic_net.get_weights()
+        with tf.GraidentTape() as tape_meta_a:
+            for env_t in env_samples:
+                tr_support = self.get_trajectory(env_t - self.args.M, 'support')
+                self.train(tr_support)
+
+                new_weight_a = self.actor_net.get_weights()
+                new_weight_c = self.critic_net.get_weights()
+
+                tr_target = self.get_trajectory(env_t, 'target')
+
+
+
+
+
         with tf.GradientTape() as tape_a:
             with tf.GradientTape() as tape_c:
                 # tape.watch([self.critic_net.trainable_variables, self.actor_net.trainable_variables])

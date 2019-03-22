@@ -214,6 +214,7 @@ class PortfolioEnv(gym.Env):
     def preprocess(self, obs):
         obs_p = (obs + 1).cumprod(axis=0) / (obs.iloc[0] + 1)
         obs_minmax = (obs_p - obs_p.min(axis=0)) / (obs_p.max(axis=0) - obs_p.min(axis=0))
+
         return obs_minmax
 
     @property
