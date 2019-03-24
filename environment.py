@@ -172,10 +172,10 @@ class PortfolioEnv(gym.Env):
 
         self._data = pd.concat([asset_df, macro_df], axis=1)
 
-    def step(self, action):
-        return self._step(action)
+    def step(self, action, preprocess=True, debugging=False):
+        return self._step(action, preprocess=preprocess, debugging=debugging)
 
-    def _step(self, action, eps=1e-8, preprocess=True):
+    def _step(self, action, eps=1e-8, preprocess=True, debugging=False):
         obs = self._data.iloc[(self.i_step - self.input_window_length):self.i_step]
         y1 = np.array(obs.iloc[-1][self.asset_list])
 
@@ -184,7 +184,9 @@ class PortfolioEnv(gym.Env):
 
         reward, info, done2 = self.sim._step(action.squeeze(), y1, np.array(obs.iloc[-1][self.macro_list]))
 
-        print("{} reward: {} // y1: {} // info: {} // done: {}".format(self.sim.step_count, reward, y1, info, done2))
+        if debugging:
+            print("{} reward: {} // y1: {} // info: {} // done: {}".format(
+                self.sim.step_count, reward, y1, info, done2))
         self.i_step += 1
         if (self.i_step == self.len_timeseries) or done2:
             done = True

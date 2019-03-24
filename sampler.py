@@ -26,7 +26,7 @@ class EnvSampler(object):
         self.env = env
         self.memory = memory
 
-    def sample_trajectory(self, policy, t0, t_length, action_noise=None):
+    def sample_trajectory(self, policy, t0, t_length, action_noise=None, training=True):
         done = False
         trajectory = list()
         obs = self.env.reset(t0)
@@ -40,7 +40,10 @@ class EnvSampler(object):
 
             obs_, reward, info, done = self.env.step(action)
 
-            trajectory.append({'obs': obs, 'action': action, 'reward': reward, 'obs_': obs_})
+            if training:
+                trajectory.append({'obs': obs, 'action': action, 'reward': reward, 'obs_': obs_})
+            else:
+                trajectory.append({'obs': obs, 'action': action, 'reward': reward, 'obs_': obs_, 'info': info})
 
             # print(_i, info, done)
             _i += 1
