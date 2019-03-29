@@ -94,13 +94,12 @@ class CriticNetwork(Model):
         return self.output_layer(x)
 
 
-class MetaDDPG:
+class DDPG:
     def __init__(self, sampler, args, action_noise=None):
         self.gamma = args.gamma
         self.sampler = sampler
         self.args = args
         self.action_noise = action_noise
-        self.initialize = False
 
         self.actor_net = ActorNetwork(env=sampler.env, dim_hidden=args.dim_hidden_a)
         self.critic_net = CriticNetwork(env=sampler.env, dim_hidden=args.dim_hidden_c)
@@ -111,110 +110,84 @@ class MetaDDPG:
         self.target_actor_net.set_weights(self.actor_net.get_weights())
         self.target_critic_net.set_weights(self.critic_net.get_weights())
 
-    def soft_replace(self):
-        params_estimate = self.actor_net.get_weights() + self.critic_net.get_weights()
-        params_target = self.target_actor_net.get_weights() + self.target_critic_net.get_weights()
+        self.inner_optimizer = tf.keras.optimizers.SGD(learning_rate=0.01)
+        self.optimizer = tf.keras.optimizers.SGD(learning_rate=0.001)
+
+        self.optim_weight_a = None
+        self.optim_weight_c = None
+
+    def save_optim_weight(self):
+        self.optim_weight_a = self.actor_net.get_weights()
+        self.optim_weight_c = self.critic_net.get_weights()
+
+    def set_optim_weight_to_network(self, with_target):
+        self.actor_net.set_weights(self.optim_weight_a)
+        self.critic_net.set_weights(self.optim_weight_c)
+
+        if with_target:
+            self.target_actor_net.set_weights(self.optim_weight_a)
+            self.target_critic_net.set_weights(self.optim_weight_c)
 
     def _trajectory_to_batch(self, trajectory):
         o_batch = np.zeros([len(trajectory)] + self.actor_net.dim_input, dtype=np.float32)
-        # a_batch = np.zeros([len(trajectory), self.actor_net.dim_output], dtype=np.float32)
+        a_batch = np.zeros([len(trajectory), self.actor_net.dim_output], dtype=np.float32)
         r_batch = np.zeros([len(trajectory), 1], dtype=np.float32)
         o_batch_ = np.zeros_like(o_batch, dtype=np.float32)
 
         for i, transition in enumerate(trajectory):
             o_batch[i] = self.process_obs(transition['obs'])
-            # a_batch[i] = transition['action']
+            a_batch[i] = transition['action']
             r_batch[i] = transition['reward']
             o_batch_[i] = self.process_obs(transition['obs_'])
 
-        return o_batch, r_batch, o_batch_
+        return o_batch, a_batch, r_batch, o_batch_
+
+    def set_action_noise(self, action_noise):
+        self.action_noise = action_noise
 
     def get_trajectory(self, env_t, type_='support', training=True):
         if type_ == 'support':
             t_length = self.args.M
         elif type_ == 'target':
-            t_length= self.args.K
+            t_length = self.args.K
         else:
             t_length = 1
 
-        tr = self.sampler.sample_trajectory(self, env_t, t_length, action_noise=self.action_noise, training=training)
+        tr, sim_data = self.sampler.sample_trajectory(self, env_t, t_length, action_noise=self.action_noise, training=training)
 
-        return tr
+        return tr, sim_data
 
     def grad_loss(self, trajectory):
         loss_c_object = tf.keras.losses.MeanSquaredError()
 
         # optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
 
-        o_batch, r_batch, o_batch_ = self._trajectory_to_batch(trajectory)
+        o_batch, a_batch, r_batch, o_batch_ = self._trajectory_to_batch(trajectory)
         o_processed = self.actor_net.shared_net(o_batch).numpy()
         o_processed_ = self.target_actor_net.shared_net(o_batch_).numpy()
         with tf.GradientTape() as tape_a:
             with tf.GradientTape() as tape_c:
                 q_target = r_batch + self.gamma * self.target_critic_net(o_processed_, self.target_actor_net(o_batch_))
+                q_pred_for_c = self.critic_net(o_processed, a_batch)
                 q_pred = self.critic_net(o_processed, self.actor_net(o_batch))
 
                 loss_a = -tf.reduce_mean(q_pred)
-                loss_c = loss_c_object(q_target, q_pred)
+                loss_c = loss_c_object(q_target, q_pred_for_c)
 
         grad_loss_a = tape_a.gradient(loss_a, self.actor_net.trainable_variables)
         grad_loss_c = tape_c.gradient(loss_c, self.critic_net.trainable_variables)
 
         return grad_loss_a, grad_loss_c
 
-    def metatrain(self, env_samples):
-        meta_loss_a = None
-        meta_loss_c = None
-
-        optimizer = tf.keras.optimizers.SGD(learning_rate=0.001)
-
-        weight_a = self.actor_net.get_weights()
-        weight_c = self.critic_net.get_weights()
-        # with tf.GradientTape() as tape_meta_a:
-        for env_t in env_samples:
-            self.actor_net.set_weights(weight_a)
-            self.critic_net.set_weights(weight_c)
-
-            self.target_actor_net.set_weights(weight_a)
-            self.target_critic_net.set_weights(weight_c)
-
-            tr_support = self.get_trajectory(env_t - self.args.M, 'support')
-            if not self.initialize:     # trajectory 첫 생성시 weight 초기화 되므로.
-                weight_a = self.actor_net.get_weights()
-                weight_c = self.critic_net.get_weights()
-                self.initialize = True
-
-            grad_loss_support_a, grad_loss_support_c = self.grad_loss(tr_support)
-
-            optimizer.apply_gradients(zip(grad_loss_support_a, self.actor_net.trainable_variables))
-            optimizer.apply_gradients(zip(grad_loss_support_c, self.critic_net.trainable_variables))
-
-            new_weight_a = self.actor_net.get_weights()
-            new_weight_c = self.critic_net.get_weights()
-
-            tr_target = self.get_trajectory(env_t, 'target')
-
-            self.actor_net.set_weights(weight_a)
-            self.critic_net.set_weights(weight_c)
-            grad_loss_a, grad_loss_c = self.grad_loss(tr_target)
-            if meta_loss_a is None:
-                meta_loss_a = [grad_loss_a[i] / len(env_samples) for i in range(len(grad_loss_a))]
-                meta_loss_c = [grad_loss_c[i] / len(env_samples) for i in range(len(grad_loss_c))]
-            else:
-                meta_loss_a = [meta_loss_a[i] + grad_loss_a[i] / len(env_samples) for i in range(len(grad_loss_a))]
-                meta_loss_c = [meta_loss_c[i] + grad_loss_c[i] / len(env_samples) for i in range(len(grad_loss_c))]
-
-        optimizer.apply_gradients(zip(meta_loss_a, self.actor_net.trainable_variables))
-        optimizer.apply_gradients(zip(meta_loss_c, self.critic_net.trainable_variables))
-
-    def fast_train(self, env_t):
-        tr_support = self.get_trajectory(env_t - self.args.M, 'support')
+    def fast_train(self, tr_support):
+        # tr_support, _ = self.get_trajectory(env_t - self.args.M, 'support')
         grad_loss_support_a, grad_loss_support_c = self.grad_loss(tr_support)
 
-        optimizer = tf.keras.optimizers.SGD(learning_rate=0.001)
-        optimizer.apply_gradients(zip(grad_loss_support_a, self.actor_net.trainable_variables))
-        optimizer.apply_gradients(zip(grad_loss_support_c, self.critic_net.trainable_variables))
-
+        # print(self.actor_net.trainable_variables[0])
+        # print(grad_loss_support_a[0])
+        self.inner_optimizer.apply_gradients(zip(grad_loss_support_a, self.actor_net.trainable_variables))
+        self.inner_optimizer.apply_gradients(zip(grad_loss_support_c, self.critic_net.trainable_variables))
+        # print(self.actor_net.trainable_variables[0])
 
     def process_obs(self, observation):
         if isinstance(observation, pd.DataFrame):
@@ -233,6 +206,114 @@ class MetaDDPG:
 
         assert len(observations.shape) == 3, "value of first dim should be batch size"
         return self.actor_net(observations).numpy()
+
+
+
+class MetaDDPG(DDPG):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.initialize = False
+
+    def metatrain(self, env_samples):
+        meta_loss_a = None
+        meta_loss_c = None
+
+        # with tf.GradientTape() as tape_meta_a:
+        for env_t in env_samples:
+
+            self.set_optim_weight_to_network(with_target=True)
+
+            tr_support, _ = self.get_trajectory(env_t - self.args.M, 'support')
+            if not self.initialize:     # trajectory 첫 생성시 weight 초기화 되므로.
+                self.optim_weight_a = self.actor_net.get_weights()
+                self.optim_weight_c = self.critic_net.get_weights()
+                self.initialize = True
+
+            grad_loss_support_a, grad_loss_support_c = self.grad_loss(tr_support)
+
+            self.inner_optimizer.apply_gradients(zip(grad_loss_support_a, self.actor_net.trainable_variables))
+            self.inner_optimizer.apply_gradients(zip(grad_loss_support_c, self.critic_net.trainable_variables))
+
+            new_weight_a = self.actor_net.get_weights()
+            new_weight_c = self.critic_net.get_weights()
+
+            tr_target, _ = self.get_trajectory(env_t, 'target')
+
+            self.set_optim_weight_to_network(with_target=False)
+            grad_loss_a, grad_loss_c = self.grad_loss(tr_target)
+            if meta_loss_a is None:
+                meta_loss_a = [grad_loss_a[i] / len(env_samples) for i in range(len(grad_loss_a))]
+                meta_loss_c = [grad_loss_c[i] / len(env_samples) for i in range(len(grad_loss_c))]
+            else:
+                meta_loss_a = [meta_loss_a[i] + grad_loss_a[i] / len(env_samples) for i in range(len(grad_loss_a))]
+                meta_loss_c = [meta_loss_c[i] + grad_loss_c[i] / len(env_samples) for i in range(len(grad_loss_c))]
+
+        self.optimizer.apply_gradients(zip(meta_loss_a, self.actor_net.trainable_variables))
+        self.optimizer.apply_gradients(zip(meta_loss_c, self.critic_net.trainable_variables))
+
+
+class MetaDDPG2(DDPG):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def soft_update(self, tau=0.001):
+        theta_a = self.actor_net.get_weights()
+        theta_a_ = self.target_actor_net.get_weights()
+
+        theta_c = self.critic_net.get_weights()
+        theta_c_ = self.target_critic_net.get_weights()
+
+        new_target_weight_a = [theta_a[i] * tau + theta_a_[i] * (1-tau) for i in range(len(theta_a))]
+        new_target_weight_c = [theta_c[i] * tau + theta_c_[i] * (1 - tau) for i in range(len(theta_c))]
+
+        self.target_actor_net.set_weights(new_target_weight_a)
+        self.target_critic_net.set_weights(new_target_weight_c)
+
+    def metatrain(self, env_samples):
+        meta_loss_a = None
+        meta_loss_c = None
+
+        if self.optim_weight_a is None:
+            self.save_optim_weight()
+            self.set_optim_weight_to_network(with_target=True)
+
+        # with tf.GradientTape() as tape_meta_a:
+
+        cur_weight_a = self.actor_net.get_weights()
+        cur_weight_c = self.critic_net.get_weights()
+
+        for env_sample in env_samples:
+            env_t, tr_support, _ = env_sample
+
+            self.actor_net.set_weights(cur_weight_a)
+            self.critic_net.set_weights(cur_weight_c)
+
+            grad_loss_support_a, grad_loss_support_c = self.grad_loss(tr_support)
+
+            self.inner_optimizer.apply_gradients(zip(grad_loss_support_a, self.actor_net.trainable_variables))
+            self.inner_optimizer.apply_gradients(zip(grad_loss_support_c, self.critic_net.trainable_variables))
+
+            # new_weight_a = self.actor_net.get_weights()
+            # new_weight_c = self.critic_net.get_weights()
+
+            tr_target, _ = self.get_trajectory(env_t, 'target')
+
+            self.actor_net.set_weights(cur_weight_a)
+            self.critic_net.set_weights(cur_weight_c)
+
+            grad_loss_a, grad_loss_c = self.grad_loss(tr_target)
+
+            if meta_loss_a is None:
+                meta_loss_a = [grad_loss_a[i] / len(env_samples) for i in range(len(grad_loss_a))]
+                meta_loss_c = [grad_loss_c[i] / len(env_samples) for i in range(len(grad_loss_c))]
+            else:
+                meta_loss_a = [meta_loss_a[i] + grad_loss_a[i] / len(env_samples) for i in range(len(grad_loss_a))]
+                meta_loss_c = [meta_loss_c[i] + grad_loss_c[i] / len(env_samples) for i in range(len(grad_loss_c))]
+
+        self.optimizer.apply_gradients(zip(meta_loss_a, self.actor_net.trainable_variables))
+        self.optimizer.apply_gradients(zip(meta_loss_c, self.critic_net.trainable_variables))
+
+        self.soft_update()
 
         #
         #
@@ -281,6 +362,13 @@ class MetaDDPG:
         #
         #     train_loss_a(grad_loss_a)
         #     train_loss_c(grad_loss_c)
+# after:
+# t:80-0 Total Rewards: -0.003614 (instant: -0.000780 / delayed: -0.002833)   Total Cost: 62.03174 bp
+# t:80-0 strategy: nav: 0.997167, mean: -0.000008(0.000114) / std: 0.008904(0.008993)
+#
+# before:
+# t:80-0 Total Rewards: -0.007200 (instant: -0.003027 / delayed: -0.004173)   Total Cost: 66.28468 bp
+# t:80-0 strategy: nav: 0.997670, mean: -0.000011(0.000114) / std: 0.010869(0.008993)
 
 
 

@@ -2,6 +2,7 @@
 import gym
 import pandas as pd
 import numpy as np
+from copy import deepcopy
 
 
 def factor_history_csv():
@@ -95,7 +96,7 @@ class PortfolioSim(object):
         elif (self.navs[self.step_count] < np.max(self.navs) * 0.9):        # MDD -10% 초과시 패널티
             done = False
             winning_reward = self.navs[self.step_count] / np.max(self.navs) * 0.9 - 1.
-        elif self.step_count % (self.max_path_length - 1) == 20:            # 월별 목표 달성시 reward/ 손실 발생시 penalty
+        elif (self.step_count + 1) % 20 == 0:            # 월별 목표 달성시 reward/ 손실 발생시 penalty
             done = False
             if self.navs[self.step_count] >= (1 + 0.05 * (self.step_count / 250)):
                 winning_reward = self.navs[self.step_count] / (1 + 0.05 * (self.step_count / 250)) - 1.
@@ -110,10 +111,10 @@ class PortfolioSim(object):
         total_reward = 0.1 * instant_reward + 0.9 * winning_reward
         self.rewards_history[self.step_count] = total_reward
 
-        info = {'instant_reward': instant_reward,
-                'winning_reward': winning_reward,
-                'nav': self.navs[self.step_count],
-                'costs': self.costs[self.step_count]}
+        info = {'instant_reward': deepcopy(instant_reward),
+                'winning_reward': deepcopy(winning_reward),
+                'nav': deepcopy(self.navs[self.step_count]),
+                'costs': deepcopy(self.costs[self.step_count])}
 
         self.step_count += 1
         return total_reward, info, done
@@ -124,11 +125,14 @@ class PortfolioSim(object):
         exported_data['asset_returns_df'] = self.assets_return_df
         exported_data['macro_returns_df'] = self.macros_return_df
         exported_data['navs'] = self.navs
+        exported_data['nav_returns'] = np.concatenate([[self.navs[0] - 1.], self.navs[1:] / self.navs[:-1] - 1.])
+        exported_data['ew_nav'] = (1 + self.assets_return_df).cumprod(axis=0).mean(axis=1).values
+        exported_data['ew_returns'] = np.concatenate([[exported_data['ew_nav'][0] - 1.], exported_data['ew_nav'][1:] / exported_data['ew_nav'][:-1] - 1.])
         exported_data['positions'] = self.positions
         exported_data['costs'] = self.costs
         exported_data['actions'] = self.actions
 
-        return exported_data
+        return deepcopy(exported_data)
 
 
 class PortfolioEnv(gym.Env):
@@ -138,11 +142,13 @@ class PortfolioEnv(gym.Env):
                  trading_cost=0.0020,
                  input_window_length=250,
                  max_path_length=120,
-                 is_training=True):
+                 is_training=True,
+                 cash_asset=True):
         super().__init__()
         self.input_window_length = input_window_length
         self.max_path_length = max_path_length
         self.trading_cost = trading_cost
+        self.cash_asset = cash_asset
 
         self.i_step = input_window_length
         self._setup()
@@ -152,7 +158,12 @@ class PortfolioEnv(gym.Env):
         asset_df = df[['mom', 'beme', 'gpa', 'kospi']]
         macro_df = df[['mkt_rf', 'smb', 'hml', 'rmw', 'wml', 'call_rate', 'usdkrw']]
 
-        self.asset_list = list(asset_df.columns)
+        n_risky_asset = len(asset_df.columns)
+        if self.cash_asset:
+            self.asset_list = list(asset_df.columns) + ['cash']
+        else:
+            self.asset_list = list(asset_df.columns)
+
         if macro_df is not None:
             self.macro_list = list(macro_df.columns)
             assert asset_df.shape[0] == macro_df.shape[0], 'length of asset_df should be same as that of macro_df.'
@@ -167,7 +178,7 @@ class PortfolioEnv(gym.Env):
         self.action_space = gym.spaces.Box(0, 1, shape=(len(self.asset_list), ), dtype=np.float32)
         self.observation_space = gym.spaces.Box(low=-np.inf,
                                                 high=np.inf,
-                                                shape=(self.input_window_length, len(self.asset_list) + len(self.macro_list)),
+                                                shape=(self.input_window_length, n_risky_asset + len(self.macro_list)),
                                                 dtype=np.float32)
 
         self._data = pd.concat([asset_df, macro_df], axis=1)
@@ -177,7 +188,10 @@ class PortfolioEnv(gym.Env):
 
     def _step(self, action, eps=1e-8, preprocess=True, debugging=False):
         obs = self._data.iloc[(self.i_step - self.input_window_length):self.i_step]
+
         y1 = np.array(obs.iloc[-1][self.asset_list])
+        if self.cash_asset:
+            y1[-1] = 0
 
         if preprocess:
             obs = self.preprocess(obs)

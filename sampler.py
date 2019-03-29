@@ -35,23 +35,26 @@ class EnvSampler(object):
         while not done:
 
             action = policy.get_action(obs)
-            if action_noise is not None:
+            if action_noise is not None and training is True:
                 action = action + action_noise()
+                action[action < 0.] = 0.0001
+                action = action / np.sum(action)
 
             obs_, reward, info, done = self.env.step(action)
 
-            if training:
-                trajectory.append({'obs': obs, 'action': action, 'reward': reward, 'obs_': obs_})
-            else:
-                trajectory.append({'obs': obs, 'action': action, 'reward': reward, 'obs_': obs_, 'info': info})
+            # if training:
+            #     trajectory.append({'obs': obs, 'action': action, 'reward': reward, 'obs_': obs_})
+            # else:
+            trajectory.append({'obs': obs, 'action': action, 'reward': reward, 'obs_': obs_, 'info': info})
 
             # print(_i, info, done)
             _i += 1
             obs = obs_.copy()
             if _i >= t_length:
+                sim_data = self.env.sim.export()
                 break
 
-        return trajectory
+        return trajectory, sim_data
 
     def sample_envs(self, num_envs):
         return self.memory.sample_batch(num_envs)

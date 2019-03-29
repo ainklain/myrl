@@ -1,6 +1,11 @@
 
 from collections import deque
 import random
+import copy
+
+# class MyDeque(deque):
+#     def __init__(self, *args, **kwargs):
+#         super().__init__(*args, **kwargs)
 
 
 class Memory(object):
@@ -24,10 +29,10 @@ class Memory(object):
 
     def sample_batch(self, batch_size):
         if self.memory_counter < batch_size:
-            print('insufficient memory')
-            return random.sample(self.memory, self.memory_counter)
+            # print('insufficient memory')
+            return copy.deepcopy(random.sample(self.memory, self.memory_counter))
             # return False
         else:
-            return random.sample(self.memory, batch_size)
+            return copy.deepcopy(random.sample(self.memory, batch_size))
 
 
