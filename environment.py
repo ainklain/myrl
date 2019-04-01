@@ -99,16 +99,17 @@ class PortfolioSim(object):
         elif (self.step_count + 1) % 20 == 0:            # 월별 목표 달성시 reward/ 손실 발생시 penalty
             done = False
             if self.navs[self.step_count] >= (1 + 0.05 * (self.step_count / 250)):
-                winning_reward = self.navs[self.step_count] / (1 + 0.05 * (self.step_count / 250)) - 1.
+                winning_reward = (self.navs[self.step_count] / (1 + 0.05 * (self.step_count / 250)) - 1.) * 10
             elif self.navs[self.step_count] >= 1:
                 winning_reward = 0
             else:
-                winning_reward = self.navs[self.step_count] - 1.
+                winning_reward = (self.navs[self.step_count] - 1.) * 10
         else:
             done = False
             winning_reward = 0
 
-        total_reward = 0.1 * instant_reward + 0.9 * winning_reward
+        # total_reward = 0.1 * instant_reward + 0.9 * winning_reward
+        total_reward = instant_reward + winning_reward
         self.rewards_history[self.step_count] = total_reward
 
         info = {'instant_reward': deepcopy(instant_reward),

@@ -110,8 +110,8 @@ class DDPG:
         self.target_actor_net.set_weights(self.actor_net.get_weights())
         self.target_critic_net.set_weights(self.critic_net.get_weights())
 
-        self.inner_optimizer = tf.keras.optimizers.SGD(learning_rate=0.01)
-        self.optimizer = tf.keras.optimizers.SGD(learning_rate=0.001)
+        self.inner_optimizer = tf.keras.optimizers.Adam(learning_rate=0.01)
+        self.optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
 
         self.optim_weight_a = None
         self.optim_weight_c = None
@@ -128,11 +128,15 @@ class DDPG:
             self.target_actor_net.set_weights(self.optim_weight_a)
             self.target_critic_net.set_weights(self.optim_weight_c)
 
-    def _trajectory_to_batch(self, trajectory):
+    def _trajectory_to_batch(self, trajectory, shuffle=True):
         o_batch = np.zeros([len(trajectory)] + self.actor_net.dim_input, dtype=np.float32)
         a_batch = np.zeros([len(trajectory), self.actor_net.dim_output], dtype=np.float32)
         r_batch = np.zeros([len(trajectory), 1], dtype=np.float32)
         o_batch_ = np.zeros_like(o_batch, dtype=np.float32)
+
+        if shuffle:
+            import random
+            random.shuffle(trajectory)
 
         for i, transition in enumerate(trajectory):
             o_batch[i] = self.process_obs(transition['obs'])
@@ -162,7 +166,7 @@ class DDPG:
 
         # optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
 
-        o_batch, a_batch, r_batch, o_batch_ = self._trajectory_to_batch(trajectory)
+        o_batch, a_batch, r_batch, o_batch_ = self._trajectory_to_batch(trajectory, shuffle=True)
         o_processed = self.actor_net.shared_net(o_batch).numpy()
         o_processed_ = self.target_actor_net.shared_net(o_batch_).numpy()
         with tf.GradientTape() as tape_a:

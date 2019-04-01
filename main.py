@@ -31,9 +31,12 @@ def print_result(tr_data, t, j, t_length=20):
     tr_for_monitor, sim_monitor = tr_data
     print("t:{}-{} Total Rewards: {:.6f} (instant: {:.6f} / delayed: {:.6f})   Total Cost: {:.5f} bp".format(
         t, j,
-        tr_for_monitor[-1]['info']['instant_reward'] + tr_for_monitor[-1]['info']['winning_reward'],
-        tr_for_monitor[-1]['info']['instant_reward'],
-        tr_for_monitor[-1]['info']['winning_reward'],
+        # tr_for_monitor[-1]['info']['instant_reward'] + tr_for_monitor[-1]['info']['winning_reward'],
+        # tr_for_monitor[-1]['info']['instant_reward'],
+        # tr_for_monitor[-1]['info']['winning_reward'],
+        np.sum([tr_for_monitor[n]['info']['instant_reward'] + tr_for_monitor[n]['info']['winning_reward'] for n in range(len(tr_for_monitor))]),
+        np.sum([tr_for_monitor[n]['info']['instant_reward'] for n in range(len(tr_for_monitor))]),
+        np.sum([tr_for_monitor[n]['info']['winning_reward'] for n in range(len(tr_for_monitor))]),
         np.sum(sim_monitor['costs']) * 10000
         # tr_for_monitor[-1]['info']['costs'] * 10000
     ))
@@ -107,9 +110,15 @@ def main():
 
             for i in range(1000):
                 model.fast_train(tr_support)
+                # print(model.actor_net.get_weights()[0])
+                # print(model.actor_net.get_weights()[-1])
+                model.soft_update()
                 if i % 100 == 0:
+                    tr_support, tr_support_sim = model.get_trajectory(t - args.M, type_='support', training=True)
                     tr_support_print = model.get_trajectory(env_t - args.M, type_='support', training=False)
                     print_result(tr_support_print, t, i, args.M)
+                    print_result([tr_support, tr_support_sim], t, i, args.M)
+
 
             model.save_optim_weight()
             s_fast_t = time.time()
