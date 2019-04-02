@@ -100,7 +100,7 @@ def main():
                     tr_support_print = model.get_trajectory(env_t - args.M, type_='support', training=False)
                     tr_target_print = model.get_trajectory(env_t, type_='target', training=False)
                     print('######################################')
-                    print('test:')
+                    print('test_rl:')
                     print_result(tr_target_print, t, j, args.K)
                     print('after:')
                     print_result(tr_support_print, t, j, args.M)

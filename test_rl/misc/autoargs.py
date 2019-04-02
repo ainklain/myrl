@@ -1,9 +1,9 @@
 
 
 def _get_prefix(cls):
-    from test.base import Policy
-    from test.base import Baseline
-    from test.base import Algorithm
+    from test_rl.base import Policy
+    from test_rl.base import Baseline
+    from test_rl.base import Algorithm
 
     if hasattr(cls.__init__, '_autoargs_prefix'):
         return cls.__init__._autoargs_prefix

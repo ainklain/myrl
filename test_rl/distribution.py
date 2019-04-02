@@ -1,4 +1,4 @@
-from test.base import Distribution
+from test_rl.base import Distribution
 
 import numpy as np
 import tensorflow as tf

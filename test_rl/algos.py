@@ -1,4 +1,6 @@
-from test.base import RLAlgorithm
+from test_rl.base import RLAlgorithm
+from test_rl.misc import ext
+from test_rl.misc.overrides import overrides
 
 import numpy as np
 import tensorflow as tf
@@ -40,7 +42,7 @@ class BatchMAMLPolopt(RLAlgorithm):
         self.start_itr = start_itr
         self.batch_size = batch_size * max_path_length * meta_batch_size
         self.max_path_length = max_path_length
-        self.discount= discount
+        self.discount = discount
         self.gae_lambda = gae_lambda
         self.plot = plot
         self.pause_for_plot = pause_for_plot
@@ -122,6 +124,7 @@ class BatchMAMLPolopt(RLAlgorithm):
                     samples_data[key] = self.process_samples(itr, paths[key], log=False)
                 all_samples_data.append(samples_data)
 
+                # for logging purposes only
                 self.process_samples(itr, flatten_list(paths.values()), prefix=str(step), log=True)
                 self.log_diagnostics(flatten_list(paths.values()), prefix=str(step))
                 if step < self.num_grad_updates:
@@ -157,7 +160,101 @@ class MAMLNPO(BatchMAMLPolopt):
         super().__init__(**kwargs)
 
     def make_vars(self, stepnum='0'):
-        pass
+        # lists over the meta_batch_size
+        obs_vars, action_vars, adv_vars = [], [], []
+        for i in range(self.meta_batch_size):
+            obs_vars.append(self.env.observation_space.new_tensor_variable(
+                'obs' + stepnum + '_' + str(i), extra_dims=1))
+            action_vars.append(self.env.observation_space.new_tensor_variable(
+                'action' + stepnum + '_' + str(i), extra_dims=1))
+            adv_vars.append(self.env.observation_space.new_tensor_variable(
+                name='advantage' + stepnum + '_' + str(i), ndim=1, dtype=tf.float32))
+        return obs_vars, action_vars, adv_vars
+
+    @overrides
+    def init_opt(self):
+        dist = self.policy.distribution
+
+        old_dist_info_vars, old_dist_info_vars_list = [], []
+        for i in range(self.meta_batch_size):
+            old_dist_info_vars.append({
+                k: tf.placeholder(tf.float32, shape=[None] + list(shape), name='old_%s_%s' % (i, k))
+                for k, shape in dist.dist_info_specs})
+            old_dist_info_vars_list += [old_dist_info_vars[i][k] for k in dist.dist_info_keys]
+
+        state_info_vars, state_info_vars_list = {}, []
+
+        all_surr_objs, input_list = [], []
+        new_params = None
+        for j in range(self.num_grad_updates):
+            obs_vars, action_vars, adv_vars = self.make_vars(str(j))
+            surr_objs = []
+
+            cur_params = new_params
+            new_params = []
+            kls = []
+
+            for i in range(self.meta_batch_size):
+                if j == 0:
+                    dist_info_vars, params = self.policy.dist_info_sym(obs_vars[i], state_info_vars, all_params=self.policy.all_params)
+                    if self.kl_constrain_step == 0:
+                        kl = dist.kl_sym(old_dist_info_vars[i], dist_info_vars)
+                        kls.append(kl)
+                else:
+                    dist_info_vars, params = self.policy.updated_dist_info_sym(i, all_surr_objs[-1][i], obs_vars[i], params_dict=cur_params[i])
+
+                new_params.append(params)
+                logli = dist.log_likelihood_sym(action_vars[i], dist_info_vars)
+
+                # formulate as a minimization problem
+                # The gradient of the surrogate objective is the policy gradient
+                surr_objs.append(-tf.reduce_mean(logli * adv_vars[i]))
+
+            input_list += obs_vars + action_vars + adv_vars + state_info_vars_list
+            if j == 0:
+                # for computing the fast update for sampling
+                self.policy.set_init_surr_obj(input_list, surr_objs)
+                init_input_list = input_list
+
+            all_surr_objs.append(surr_objs)
+
+        obs_vars, action_vars, adv_vars = self.make_vars('test_rl')
+        surr_objs = []
+        for i in range(self.meta_batch_size):
+            dist_info_vars, _ = self.policy.updated_dist_info_sym(i, all_surr_objs[-1][i], obs_vars[i], params_dict=new_params[i])
+
+            if self.kl_constrain_step == -1:
+                # if we only care about the kl of the last step, the last item in kls will be the overall
+                kl = dist.kl_sym(old_dist_info_vars[i], dist_info_vars)
+                kls.append(kl)
+            lr = dist.likelihood_ratio_sym(action_vars[i], old_dist_info_vars[i], dist_info_vars)
+            surr_objs.append(-tf.reduce_mean(lr * adv_vars[i]))
+
+        if self.use_maml:
+            surr_obj = tf.reduce_mean(tf.stack(surr_objs, 0))   # mean over meta_batch_size (the diff tasks)
+            input_list += obs_vars + action_vars + adv_vars + old_dist_info_vars_list
+        else:
+            surr_obj = tf.reduce_mean(tf.stack(all_surr_objs[0], 0))
+            input_list = init_input_list
+
+        if self.use_maml:
+            mean_kl = tf.reduce_mean(tf.concat(kls, 0))
+            max_kl = tf.reduce_max(tf.concat(kls, 0))
+
+            self.optimizer.update_opt(
+                loss=surr_obj,
+                target=self.policy,
+                leq_constraint=(mean_kl, self.step_size),
+                inputs=input_list,
+                constraint_name='mean_kl')
+        else:
+            self.optimizer.update_opt(
+                loss=surr_obj,
+                target=self.policy,
+                inputs=input_list)
+
+        return dict()
+
 
     @overrides
     def optimize_policy(self, itr, all_samples_data):

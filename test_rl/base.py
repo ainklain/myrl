@@ -1,4 +1,4 @@
-from test.misc import autoargs
+from test_rl.misc import autoargs
 
 
 class Algorithm(object):
@@ -121,3 +121,25 @@ class Distribution(object):
         return [k for k, _ in self.dist_info_specs]
 
 
+class Space:
+    def sample(self, seed=0):
+        raise NotImplementedError
+
+    def contains(self, x):
+        raise NotImplementedError
+
+    def flatten(self, x):
+        raise NotImplementedError
+
+    def unflatten(self, x):
+        raise NotImplementedError
+
+    def flatten_n(self, xs):
+        raise NotImplementedError
+
+    @property
+    def flat_dim(self):
+        raise NotImplementedError
+
+    def new_tensor_variable(self, name, extra_dims):
+        raise NotImplementedError
