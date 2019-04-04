@@ -51,25 +51,25 @@ class DiagonalGaussian(Distribution):
         means = dist_info_vars['mean']
         log_stds = dist_info_vars['log_std']
         zs = (x_var - means) / tf.exp(log_stds)
-        return - tf.reduce_sum(log_stds, reduction_indices=-1) \
-               - 0.5 * tf.reduce_sum(tf.square(zs), reduction_indices=-1) \
+        return - tf.reduce_sum(log_stds, axis=-1) \
+               - 0.5 * tf.reduce_sum(tf.square(zs), axis=-1) \
                - 0.5 * self.dim * np.log(2 * np.pi)
 
     def sample(self, dist_info):
         means = dist_info['mean']
         log_stds = dist_info['log_std']
         rnd = np.random.normal(size=means.shape)
-        return rnd * np.exp(log_stds) + means
+        return rnd * tf.exp(log_stds) + means
 
     def log_likelihood(self, xs, dist_info):
         means = dist_info['mean']
         log_stds = dist_info['log_std']
-        zs = (xs - means) / np.exp(log_stds)
+        zs = (xs - means) / tf.exp(log_stds)
         return - np.sum(log_stds, axis=-1) - 0.5 * np.sum(np.square(zs), axis=-1) - 0.5 * self.dim * np.log(2 * np.pi)
 
     def entropy(self, dist_info):
         log_stds = dist_info['log_std']
-        return np.sum(log_stds + np.log(np.sqrt(2 * np.pi * np.e)), axis=-1)
+        return tf.reduce_sum(log_stds + np.log(np.sqrt(2 * np.pi * np.e)), axis=-1)
 
     @property
     def dist_info_specs(self):

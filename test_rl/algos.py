@@ -90,27 +90,15 @@ class BatchMAMLPolopt(RLAlgorithm):
 
         if load_policy is not None:
             self.policy = LOAD_POLICY()
-            # import joblib
-            # self.policy = joblib.load(self.load_policy)['policy']
 
         # initialize
         self.init_opt()
-        # uninit_vars = []
-        # for var in tf.global_variables():
-        #     try:
-        #         sess.run(var)
-        #     except tf.errors.FailedPreconditionError:
-        #         uninit_vars.append(var)
-        # sess.run(tf.variables_initializer(uninit_vars))
 
         start_time = time.time()
         for itr in range(self.start_itr, self.n_itr):
             itr_start_time = time.time()
 
             env = self.env
-            while 'sample_goals' not in dir(env):
-                env = env.wrapped_env
-
             learner_env_goals = env.sample_goals(self.meta_batch_size)
 
             self.policy.switch_to_init_dist()
@@ -175,6 +163,7 @@ class MAMLNPO(BatchMAMLPolopt):
     def init_opt(self):
         dist = self.policy.distribution
 
+        # define distribution tensors for
         old_dist_info_vars, old_dist_info_vars_list = [], []
         for i in range(self.meta_batch_size):
             old_dist_info_vars.append({

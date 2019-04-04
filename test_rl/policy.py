@@ -1,3 +1,4 @@
+
 from test_rl.base import Policy, StochasticPolicy
 from test_rl.misc import ext
 from test_rl.distribution import DiagonalGaussian
@@ -10,34 +11,34 @@ from collections import OrderedDict
 from tensorflow.keras import Model
 from tensorflow.keras.layers import Dense
 
+
 class MyModel(Model):
     def __init__(self,
-                 name,
                  dim_output,
                  hidden_sizes,
-                 hidden_W_init='glorot_uniform',
-                 hidden_b_init='zeros',
-                 output_W_init='glorot_uniform',
-                 output_b_init='zeros',
-                 hidden_nonlinearity='relu',
-                 output_nonlinearity='linear',
+                 hidden_kernel_initializer='glorot_uniform',
+                 hidden_bias_initializer='zeros',
+                 output_kernel_initializer='glorot_uniform',
+                 output_bias_initializer='zeros',
+                 hidden_activation='relu',
+                 output_activation='linear',
                  weight_normalization=False):
-        super().__init__()
-        self.name = name
+        super(MyModel, self).__init__()
         self.dim_output = dim_output
         self.hidden_layers = list()
         for dim_h in hidden_sizes:
             self.hidden_layers.append(Dense(dim_h,
-                                            kernel_initializer=hidden_W_init,
-                                            bias_initializer=hidden_b_init,
-                                            activation=hidden_nonlinearity))
+                                            kernel_initializer=hidden_kernel_initializer,
+                                            bias_initializer=hidden_bias_initializer,
+                                            activation=hidden_activation))
 
         self.output_layer = Dense(dim_output,
-                                  kernel_initializer=output_W_init,
-                                  bias_initializer=output_b_init,
-                                  activation=output_nonlinearity)
+                                  kernel_initializer=output_kernel_initializer,
+                                  bias_initializer=output_bias_initializer,
+                                  activation=output_activation)
 
     def call(self, x):
+        x = tf.cast(x, tf.float32)
         for h_layer in self.hidden_layers:
             x = h_layer(x)
         x = self.output_layer(x)
@@ -79,8 +80,7 @@ class MAMLGaussianMLPPolicy(StochasticPolicy):
             raise NotImplementedError
 
         if mean_network is None:
-            self.mean_network = MyModel('mean_network',
-                                        dim_output=self.action_dim,
+            self.mean_network = MyModel(dim_output=self.action_dim,
                                         hidden_sizes=hidden_sizes,
                                         hidden_nonlinearity=hidden_nonlinearity,
                                         output_nonlinearity=output_nonlinearity)
@@ -108,19 +108,15 @@ class MAMLGaussianMLPPolicy(StochasticPolicy):
                 else:
                     raise NotImplementedError
 
-                self.mean_network = MyModel('output_std_network',
-                                            dim_output=self.action_dim,
-                                            hidden_sizes=hidden_sizes,
-                                            hidden_nonlinearity=hidden_nonlinearity,
-                                            output_nonlinearity=output_nonlinearity)
 
-                self.all_params['std_param'] = make_param_layer(
-                    num_units=self.action_dim,
-                    param=tf.constant_initializer(init_std_param),
-                    name='output_std_param',
-                    trainable=learn_std,
-                )
-                forward_std = lambda x, params: forward_param_layer(x, params['std_param'])
+                # self.all_params['std_param'] = make_param_layer(
+                #     num_units=self.action_dim,
+                #     param=tf.constant_initializer(init_std_param),
+                #     name='output_std_param',
+                #     trainable=learn_std,
+                # )
+                # forward_std = lambda x, params: forward_param_layer(x, params['std_param'])
+
             self.all_param_vals = None
 
             self._forward = lambda obs, params, is_train: (
