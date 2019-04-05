@@ -172,40 +172,43 @@ class PPO(object):
 
         self.assign_old_network()
 
-        idx = np.arange(len(s_batch))
-        np.random.shuffle(idx)
-        for i in range(len(s_batch) // MINIBATCH):
-            s_mini = s_batch[idx[i * MINIBATCH: (i + 1) * MINIBATCH]]
-            a_mini = a_batch[idx[i * MINIBATCH: (i + 1) * MINIBATCH]]
-            r_mini = r_batch[idx[i * MINIBATCH: (i + 1) * MINIBATCH]]
-            adv_mini = adv_batch[idx[i * MINIBATCH: (i + 1) * MINIBATCH]]
-            with tf.GradientTape() as tape:
-                ratio = self.dist.likelihood_ratio_sym(
-                    a_mini,
-                    {'mean': self.old_mean_network(s_mini), 'log_std': self.old_log_sigma},
-                    {'mean': self.mean_network(s_mini), 'log_std': self.log_sigma})
-                # ratio = tf.maximum(logli, 1e-6) / tf.maximum(old_logli, 1e-6)
-                ratio = tf.clip_by_value(ratio, 0, 10)
-                surr1 = adv_mini.squeeze() * ratio
-                surr2 = adv_mini.squeeze() * tf.clip_by_value(ratio, 1 - epsilon_decay, 1 + epsilon_decay)
-                loss_pi = - tf.reduce_mean(tf.minimum(surr1, surr2))
+        for epoch in range(EPOCHS):
+            idx = np.arange(len(s_batch))
+            np.random.shuffle(idx)
+            for i in range(len(s_batch) // MINIBATCH):
+                s_mini = s_batch[idx[i * MINIBATCH: (i + 1) * MINIBATCH]]
+                a_mini = a_batch[idx[i * MINIBATCH: (i + 1) * MINIBATCH]]
+                r_mini = r_batch[idx[i * MINIBATCH: (i + 1) * MINIBATCH]]
+                adv_mini = adv_batch[idx[i * MINIBATCH: (i + 1) * MINIBATCH]]
+                with tf.GradientTape() as tape:
+                    ratio = self.dist.likelihood_ratio_sym(
+                        a_mini,
+                        {'mean': self.old_mean_network(s_mini) * self.a_bound, 'log_std': self.old_log_sigma},
+                        {'mean': self.mean_network(s_mini) * self.a_bound, 'log_std': self.log_sigma})
+                    # ratio = tf.maximum(logli, 1e-6) / tf.maximum(old_logli, 1e-6)
+                    ratio = tf.clip_by_value(ratio, 0, 10)
+                    surr1 = adv_mini.squeeze() * ratio
+                    surr2 = adv_mini.squeeze() * tf.clip_by_value(ratio, 1 - epsilon_decay, 1 + epsilon_decay)
+                    loss_pi = - tf.reduce_mean(tf.minimum(surr1, surr2))
 
-                v_old = self.old_critic_network(s_mini)
-                v = self.critic_network(s_mini)
-                clipped_value_estimate = v_old + tf.clip_by_value(v - v_old, -epsilon_decay, epsilon_decay)
-                loss_v1 = tf.math.squared_difference(clipped_value_estimate, r_mini)
-                loss_v2 = tf.math.squared_difference(v, r_mini)
-                loss_v = tf.reduce_mean(tf.maximum(loss_v1, loss_v2)) * 0.5
+                    v_old = self.old_critic_network(s_mini)
+                    v = self.critic_network(s_mini)
+                    clipped_value_estimate = v_old + tf.clip_by_value(v - v_old, -epsilon_decay, epsilon_decay)
+                    loss_v1 = tf.math.squared_difference(clipped_value_estimate, r_mini)
+                    loss_v2 = tf.math.squared_difference(v, r_mini)
+                    loss_v = tf.reduce_mean(tf.maximum(loss_v1, loss_v2)) * 0.5
 
-                entropy = self.dist.entropy({'mean': self.mean_network(s_mini), 'log_std': self.log_sigma})
-                pol_entpen = -ENTROPY_BETA * tf.reduce_mean(entropy)
+                    entropy = self.dist.entropy({'mean': self.mean_network(s_mini), 'log_std': self.log_sigma})
+                    pol_entpen = -ENTROPY_BETA * tf.reduce_mean(entropy)
 
-                loss = loss_pi + loss_v * VF_COEFF + pol_entpen
+                    loss = loss_pi + loss_v * VF_COEFF + pol_entpen
 
-            grad = tape.gradient(loss, self.mean_network.trainable_variables + self.critic_network.trainable_variables + [self.log_sigma])
-            self.optimizer.apply_gradients(zip(grad, self.mean_network.trainable_variables + self.critic_network.trainable_variables + [self.log_sigma]))
+                grad = tape.gradient(loss, self.mean_network.trainable_variables + self.critic_network.trainable_variables + [self.log_sigma])
+                self.optimizer.apply_gradients(zip(grad, self.mean_network.trainable_variables + self.critic_network.trainable_variables + [self.log_sigma]))
 
-            print("i: {} / {} ({}%),  loss: {:.8f}".format(i, len(s_batch) // MINIBATCH, i / (len(s_batch) // MINIBATCH), loss))
+                print("epoch: {} - {}/{} ({:.3f}%),  loss: {:.8f}".format(epoch, i, len(s_batch) // MINIBATCH, i / (len(s_batch) // MINIBATCH) * 100., loss))
+                if i % 10 == 0:
+                    print(grad[-1])
 
     def save_model(self, model_path, model_name='model.pkl'):
         w_dict = {}
@@ -255,6 +258,7 @@ def main():
     for episode in range(EP_MAX + 1):
         print(episode)
         s = env.reset()
+        s = s / 255.
         env.render()
         ep_r, ep_t, ep_a = 0, 0, []
 
@@ -295,6 +299,7 @@ def main():
             if not ppo.discrete:
                 a = tf.clip_by_value(a, env.action_space.low, env.action_space.high)
             s, r, terminal, _ = env.step(np.squeeze(a))
+            s = s / 255.
             buffer_r.append(r)
             ep_r += r
             ep_t += 1
