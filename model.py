@@ -30,5 +30,6 @@ class MyModel(RLAlgorithm):
         self.n_itr = n_itr
 
     def train(self):
+        pass
 
 

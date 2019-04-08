@@ -146,7 +146,11 @@ class PPO(object):
 
         self.optimizer = tf.optimizers.Adam(LR)
 
-        self.initialize = False
+        self._initialize(env.reset())
+
+    def _initialize(self, s):
+        _, _ = self.mean_network(s), self.critic_network(s)
+        _, _ = self.old_mean_network(s), self.old_critic_network(s)
 
     def assign_old_network(self):
         self.old_mean_network.set_weights(self.mean_network.get_weights())
@@ -154,9 +158,6 @@ class PPO(object):
         self.old_log_sigma.assign(self.log_sigma.numpy())
 
     def evaluate_state(self, state, stochastic=True):
-        if not self.initialize:
-            _, _ = self.old_mean_network(state), self.old_critic_network(state)
-
         if stochastic:
             action = self.dist.sample({'mean': self.mean_network(state), 'log_std': self.log_sigma})
             value_ = self.critic_network(state)
@@ -248,6 +249,7 @@ def main():
     ppo = PPO(env)
     if os.path.exists('./model.pkl'):
         ppo.load_model('./')
+
 
     t, terminal = 0, False
     buffer_s, buffer_a, buffer_r, buffer_v, buffer_terminal = [], [], [], [], []
