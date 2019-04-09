@@ -7,7 +7,7 @@ import random
 import tensorflow as tf
 
 from tensorflow.keras import Model
-from tensorflow.keras.layers import Dense, Flatten, Conv2D, Reshape, BatchNormalization, ReLU
+from tensorflow.keras.layers import Layer, Dense, Flatten, Conv2D, Reshape, BatchNormalization, ReLU
 
 
 EP_MAX = 1000
@@ -102,7 +102,7 @@ class PPO:
         self.s_dim = env.observation_space.shape
         if len(env.observation_space.shape) > 0:
             self.a_dim = env.action_space.shape[0]
-            self.a_bound = (env.action_space.high - env.action_space.low) / 2
+            self.a_bound = (env.action_space.high - env.action_space.low) / 2.
         else:
             self.a_dim = env.action_space.n
 
@@ -135,7 +135,37 @@ class PPO:
             action = mu
         return action, value_
 
+    def grad_loss(self, trajectory):
+        loss_c_object = tf.keras.losses.MeanSquaredError()
 
+        # optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
+
+        o_batch, a_batch, r_batch, o_batch_ = self._trajectory_to_batch(trajectory, shuffle=True)
+        o_processed = self.actor_net.shared_net(o_batch).numpy()
+        o_processed_ = self.target_actor_net.shared_net(o_batch_).numpy()
+        with tf.GradientTape() as tape_a:
+            with tf.GradientTape() as tape_c:
+                q_target = r_batch + self.gamma * self.target_critic_net(o_processed_, self.target_actor_net(o_batch_))
+                q_pred_for_c = self.critic_net(o_processed, a_batch)
+                q_pred = self.critic_net(o_processed, self.actor_net(o_batch))
+
+                loss_a = -tf.reduce_mean(q_pred)
+                loss_c = loss_c_object(q_target, q_pred_for_c)
+
+        grad_loss_a = tape_a.gradient(loss_a, self.actor_net.trainable_variables)
+        grad_loss_c = tape_c.gradient(loss_c, self.critic_net.trainable_variables)
+
+        return grad_loss_a, grad_loss_c
+
+    def fast_train(self, tr_support):
+        # tr_support, _ = self.get_trajectory(env_t - self.args.M, 'support')
+        grad_loss_support_a, grad_loss_support_c = self.grad_loss(tr_support)
+
+        # print(self.actor_net.trainable_variables[0])
+        # print(grad_loss_support_a[0])
+        self.inner_optimizer.apply_gradients(zip(grad_loss_support_a, self.actor_net.trainable_variables))
+        self.inner_optimizer.apply_gradients(zip(grad_loss_support_c, self.critic_net.trainable_variables))
+        # print(self.actor_net.trainable_variables[0])
 
 
 class DDPG:

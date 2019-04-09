@@ -45,7 +45,7 @@ class DiagonalGaussian(Distribution):
     def likelihood_ratio_sym(self, x_var, old_dist_info_vars, new_dist_info_vars):
         logli_new = self.log_likelihood_sym(x_var, new_dist_info_vars)
         logli_old = self.log_likelihood_sym(x_var, old_dist_info_vars)
-        return tf.exp(logli_new - logli_old)
+        return tf.exp(logli_new - logli_old + 1e-6)
 
     def log_likelihood_sym(self, x_var, dist_info_vars):
         means = dist_info_vars['mean']

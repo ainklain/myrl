@@ -23,7 +23,7 @@ LAMBDA = 0.95
 ENTROPY_BETA = 0.01
 LR = 0.0001
 # BATCH = 8192
-BATCH = 1024
+BATCH = 2048
 MINIBATCH = 32
 EPOCHS = 10
 EPSILON = 0.1
@@ -98,7 +98,7 @@ class ParamNetwork(Model):
         self.dense1 = Dense(400, activation=tf.nn.relu, kernel_regularizer=l2(L2_REG))
         self.dense2 = Dense(400, activation=tf.nn.relu, kernel_regularizer=l2(L2_REG))
         self.dense_mu = Dense(a_dim, activation=tf.nn.tanh, kernel_regularizer=l2(L2_REG))
-        self.dense_critic = Dense(1, activation=tf.nn.tanh, kernel_regularizer=l2(L2_REG))
+        self.dense_critic = Dense(1, kernel_regularizer=l2(L2_REG))
 
     def call(self, x):
         x = self.feature_net(x)
@@ -127,6 +127,8 @@ class PPO(object):
 
         self.optimizer = tf.optimizers.Adam(LR)
 
+        self.global_step = 0
+
         self._initialize(env.reset())
 
     def _initialize(self, s):
@@ -145,17 +147,26 @@ class PPO(object):
             action = mu
         return action, value_
 
+    def polynomial_epsilon_decay(self, learning_rate, global_step, decay_steps, end_learning_rate, power):
+        global_step = min(self.global_step, decay_steps)
+        decayed_learning_rate = (learning_rate - end_learning_rate) * (1 - global_step / decay_steps) ** (power) \
+                                + end_learning_rate
+
+        return decayed_learning_rate
+
     def update(self, s_batch, a_batch, r_batch, adv_batch):
         start = time()
         e_time = []
-        epsilon_decay = 0.1
 
         self.assign_old_network()
 
         for epoch in range(EPOCHS):
             idx = np.arange(len(s_batch))
             np.random.shuffle(idx)
+
+            loss_per_epoch = 0
             for i in range(len(s_batch) // MINIBATCH):
+                epsilon_decay = self.polynomial_epsilon_decay(0.1, self.global_step, 1e5, 0.01, power=1.0)
                 s_mini = s_batch[idx[i * MINIBATCH: (i + 1) * MINIBATCH]]
                 a_mini = a_batch[idx[i * MINIBATCH: (i + 1) * MINIBATCH]]
                 r_mini = r_batch[idx[i * MINIBATCH: (i + 1) * MINIBATCH]]
@@ -186,15 +197,21 @@ class PPO(object):
                 grad = tape.gradient(loss, self.param_network.trainable_variables + [self.log_sigma])
                 self.optimizer.apply_gradients(zip(grad, self.param_network.trainable_variables + [self.log_sigma]))
 
-                print("epoch: {} - {}/{} ({:.3f}%),  loss: {:.8f}".format(epoch, i, len(s_batch) // MINIBATCH,
-                                                                          i / (len(s_batch) // MINIBATCH) * 100., loss))
-                if i % 10 == 0:
-                    print(grad[-1])
+                loss_per_epoch = loss_per_epoch + loss
+                # print("epoch: {} - {}/{} ({:.3f}%),  loss: {:.8f}".format(epoch, i, len(s_batch) // MINIBATCH,
+                #                                                           i / (len(s_batch) // MINIBATCH) * 100., loss))
+                # if i % 10 == 0:
+                #     print(grad[-1])
+
+                self.global_step += 1
+
+            print("epoch: {} - loss: {}".format(epoch, loss_per_epoch / (len(s_batch) // MINIBATCH) * 100))
 
     def save_model(self, model_path, model_name='{}.pkl'.format(model_name)):
         w_dict = {}
         w_dict['param_network'] = self.param_network.get_weights()
         w_dict['log_sigma'] = self.log_sigma.numpy()
+        w_dict['global_step'] = self.global_step
 
         f_name = os.path.join(model_path, model_name)
         with open(f_name, 'wb') as f:
@@ -208,6 +225,7 @@ class PPO(object):
             w_dict = pickle.load(f)
         self.param_network.set_weights(w_dict['param_network'])
         self.log_sigma.assign(w_dict['log_sigma'])
+        self.global_step = w_dict['global_step']
 
         print("model loaded. (path: {})".format(f_name))
 
@@ -226,13 +244,13 @@ def main():
     ppo = PPO(env)
     if os.path.exists('./{}.pkl'.format(model_name)):
         ppo.load_model('./')
-    print(ppo.param_network.get_weights()[0][0][0][0])
+
     t, terminal = 0, False
     buffer_s, buffer_a, buffer_r, buffer_v, buffer_terminal = [], [], [], [], []
 
     rolling_r = RunningStats()
 
-    EP_MAX = 1
+    EP_MAX = 1000
     for episode in range(EP_MAX + 1):
         print(episode)
         s = env.reset()
@@ -241,7 +259,9 @@ def main():
         ep_r, ep_t, ep_a = 0, 0, []
 
         while True:
-            a, v = ppo.evaluate_state(s)
+            a, v = ppo.evaluate_state(s, stochastic=True)
+            a_det, v_det = ppo.evaluate_state(s, stochastic=False)
+            # print("v: {} / a: {}".format(a_det, v_det))
             env.render()
 
             if t == BATCH:
@@ -288,5 +308,35 @@ def main():
                 ppo.save_model('./')
                 break
 
-    print(ppo.param_network.get_weights()[0][0][0][0])
     env.close()
+
+
+
+    env = gym.make(ENVIRONMENT)
+    ppo = PPO(env)
+    if os.path.exists('./{}.pkl'.format(model_name)):
+        ppo.load_model('./')
+
+    t, terminal = 0, False
+    for episode in range(5 + 1):
+        print(episode)
+        s = env.reset()
+        s = s / 255.
+        env.render()
+        ep_r, ep_t, ep_a = 0, 0, []
+
+        while True:
+            a, v = ppo.evaluate_state(s, stochastic=False)
+            env.render()
+
+            if not ppo.discrete:
+                a = tf.clip_by_value(a, env.action_space.low, env.action_space.high)
+            s, r, terminal, _ = env.step(np.squeeze(a))
+            s = s / 255.
+            buffer_r.append(r)
+            ep_r += r
+            ep_t += 1
+            t += 1
+
+            if terminal:
+                break
