@@ -46,11 +46,15 @@ class FeatureNetwork(Model):
 
     def call(self, x):
         x = tf.cast(x, tf.float32)
+        assert len(x.shape) == 3
 
-        if len(x.shape) in [2, 3]:
-            if len(x.shape) == 2:
-                x = tf.expand_dims(x, 0)
-            x = tf.expand_dims(x, -1)
+        for pos in range(x.shape[0]):
+            for i in range(x.shape[1]):
+
+
+
+
+        x = tf.expand_dims(x, 0)
 
         x_20 = self.conv20(x)
         x_20 = self.batch_norm(x_20)

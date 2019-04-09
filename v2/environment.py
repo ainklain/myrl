@@ -142,7 +142,7 @@ class PortfolioEnv(gym.Env):
     def __init__(self,
                  trading_cost=0.0020,
                  input_window_length=250,
-                 max_path_length=120,
+                 max_path_length=250,
                  is_training=True,
                  cash_asset=True):
         super().__init__()
@@ -185,17 +185,19 @@ class PortfolioEnv(gym.Env):
         self._data = pd.concat([asset_df, macro_df], axis=1)
 
     def step(self, action, preprocess=True, debugging=False):
-        return self._step(action, preprocess=preprocess, debugging=debugging)
+        return self._step(action, debugging=debugging)
 
-    def _step(self, action, eps=1e-8, preprocess=True, debugging=False):
+    def _step(self, action, debugging=False):
         obs = self._data.iloc[(self.i_step - self.input_window_length):self.i_step]
+
+        s = np.stack((obs.values,
+                      self.preprocess(obs).values,
+                      (obs.values >= 0) * 1. + (obs.values < 0) * -1.),
+                     axis=-1)
 
         y1 = np.array(obs.iloc[-1][self.asset_list])
         if self.cash_asset:
             y1[-1] = 0
-
-        if preprocess:
-            obs = self.preprocess(obs)
 
         reward, info, done2 = self.sim._step(action.squeeze(), y1, np.array(obs.iloc[-1][self.macro_list]))
 
@@ -208,19 +210,21 @@ class PortfolioEnv(gym.Env):
         else:
             done = False
 
-        return obs, reward, info, done
+        return s, reward, info, done
 
     def reset(self, t0=0):
         return self._reset(t0)
 
-    def _reset(self, t0=0, preprocess=True):
+    def _reset(self, t0=0):
         self.i_step = self.input_window_length + t0
         self.sim.reset()
         obs = self._data.iloc[(self.i_step - self.input_window_length):self.i_step]
-        if preprocess:
-            obs = self.preprocess(obs)
+        s = np.stack((obs.values,
+                      self.preprocess(obs).values,
+                      (obs.values >= 0) * 1. + (obs.values < 0) * -1.),
+                     axis=-1)
         self.i_step += 1
-        return obs
+        return s
 
     def render(self, mode='human', close=False):
         return self._render(mode=mode,  close=close)
