@@ -84,7 +84,7 @@ class PortfolioSim(object):
         self.navs[self.step_count] = last_nav * (1. + instant_reward)
         self.assets_nav[self.step_count, :] = last_asset_nav * (1. + assets_return)
 
-        if (self.navs[self.step_count] == 0):       # 파산
+        if (self.navs[self.step_count] == 0):       # 파산 (MDD -50% 조건 때문에 실행 안될것)
             done = True
             winning_reward = -1
         elif self.step_count == (self.max_path_length - 1):         # 최대 기간 도달
@@ -93,6 +93,9 @@ class PortfolioSim(object):
                 winning_reward = 1
             else:
                 winning_reward = -1
+        elif (self.navs[self.step_count] < np.max(self.navs) * 0.5):        # MDD -50% 초과시
+            done = True
+            winning_reward = -1
         elif (self.navs[self.step_count] < np.max(self.navs) * 0.9):        # MDD -10% 초과시 패널티
             done = False
             winning_reward = self.navs[self.step_count] / np.max(self.navs) * 0.9 - 1.
@@ -179,7 +182,7 @@ class PortfolioEnv(gym.Env):
         self.action_space = gym.spaces.Box(0, 1, shape=(len(self.asset_list), ), dtype=np.float32)
         self.observation_space = gym.spaces.Box(low=-np.inf,
                                                 high=np.inf,
-                                                shape=(self.input_window_length, n_risky_asset + len(self.macro_list)),
+                                                shape=(self.input_window_length, n_risky_asset + len(self.macro_list), 3),
                                                 dtype=np.float32)
 
         self._data = pd.concat([asset_df, macro_df], axis=1)
@@ -231,6 +234,18 @@ class PortfolioEnv(gym.Env):
 
     def _render(self, mode='human', close=False):
         pass
+        # if close:
+        #     return
+        # if mode == 'ansi':
+        #     pprint(self.infos[-1])
+        # elif mode == 'human':
+        #     if self.render_call == 0:
+        #         self.fig = plt.figure()
+        #         self.ax1, self.ax2, self.ax3 = self.fig.subplots(3, 1)
+        #         self.render_call += 1
+        #     self._get_image()
+        #     if self.sim.step % 20 == 0:
+
 
     def preprocess(self, obs):
         obs_p = (obs + 1).cumprod(axis=0) / (obs.iloc[0] + 1)

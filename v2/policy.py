@@ -1,10 +1,15 @@
 
 from test_rl.distribution import DiagonalGaussian
+from v2.environment import PortfolioEnv
 
+from datetime import datetime
 import numpy as np
+import os
 import pandas as pd
+import pickle
 import random
 import tensorflow as tf
+import time
 
 from tensorflow.keras import Model
 from tensorflow.keras.layers import Layer, Dense, Flatten, Conv2D, Reshape, BatchNormalization, ReLU
@@ -17,70 +22,112 @@ ENTROPY_BETA = 0.01
 LR = 0.0001
 META_LR = 0.001
 # BATCH = 8192
-BATCH = 1024
+BATCH = 512
 MINIBATCH = 32
 EPOCHS = 10
 EPSILON = 0.1
 VF_COEFF = 1.0
 L2_REG = 0.001
 SIGMA_FLOOR = 0.0
-model_name = 'model_shared'
+
+
+
+def discount(x, gamma, terminal_array=None):
+    if terminal_array is None:
+        return scipy.signal.lfilter([1], [1, -gamma], x[::-1], axis=0)[::-1]
+    else:
+        y, adv = 0, []
+        terminals_reversed = terminal_array[1:][::-1]
+        for step, dt in enumerate(reversed(x)):
+            y = dt + gamma * y * (1 - terminals_reversed[step])
+            adv.append(y)
+        return np.array(adv)[::-1]
+
+
+class RunningStats:
+    def __init__(self, epsilon=1e-4, shape=()):
+        self.mean = np.zeros(shape, 'float64')
+        self.var = np.ones(shape, 'float64')
+        self.std = np.ones(shape, 'float64')
+        self.count = epsilon
+
+    def update(self, x):
+        batch_mean = np.mean(x, axis=0)
+        batch_var = np.var(x, axis=0)
+        batch_count = x.shape[0]
+        self.update_from_moments(batch_mean, batch_var, batch_count)
+
+    def update_from_moments(self, batch_mean, batch_var, batch_count):
+        delta = batch_mean - self.mean
+        new_mean = self.mean + delta * batch_count / (self.count + batch_count)
+        m_a = self.var * self.count
+        m_b = batch_var * batch_count
+        M2 = m_a + m_b + np.square(delta) * self.count * batch_count / (self.count + batch_count)
+        new_var = M2 / (self.count + batch_count)
+
+        self.mean = new_mean
+        self.var = new_var
+        self.std = np.maximum(np.sqrt(self.var), 1e-6)
+        self.count = batch_count + self.count
 
 
 class FeatureNetwork(Model):
-    def __init__(self, env):
+    def __init__(self):
         super(FeatureNetwork, self).__init__()
-        self.dim_input = list(env.observation_space.shape)
-        self.dim_output = env.action_space.shape[0]
+        # self.dim_input = list(env.observation_space.shape)
+        # self.dim_output = env.action_space.shape[0]
         # self.reshape = Reshape(self.dim_input + [1])
 
         self.relu = ReLU()
         self.flatten = Flatten()
         self.batch_norm = BatchNormalization()
 
-        self.conv20 = Conv2D(32, (20, 1), dtype=tf.float32, padding='same')
-        self.conv60 = Conv2D(32, (60, 1), dtype=tf.float32, padding='same')
+        self.conv1 = Conv2D(8, (1, 1), dtype=tf.float32)
+        self.conv20 = Conv2D(8, (20, 1), dtype=tf.float32, padding='same')
+        self.conv60 = Conv2D(8, (60, 1), dtype=tf.float32, padding='same')
 
-        self.conv = Conv2D(64, (20, 1), strides=(20, 1), dtype=tf.float32)
-        self.conv1x1 = Conv2D(1, (1, 1), dtype=tf.float32)
+        self.conv = Conv2D(4, (20, 1), strides=(20, 1), dtype=tf.float32)
 
     def call(self, x):
         x = tf.cast(x, tf.float32)
-        assert len(x.shape) == 3
+        if len(x.shape) == 3:
+            x = tf.expand_dims(x, 0)
 
-        for pos in range(x.shape[0]):
-            for i in range(x.shape[1]):
+        positional_encoding = np.zeros([1, x.shape[1], x.shape[2], 1])
+        for pos in range(x.shape[1]):
+            for i in range(x.shape[2]):
+                i_ = i // 2
+                if i % 2 == 0:
+                    positional_encoding[:, pos, 2 * i_, :] = np.sin(pos / 10000 ** (2 * i_ / x.shape[2]))
+                else:
+                    positional_encoding[:, pos, 2 * i_ + 1, :] = np.cos(pos / 10000 ** (2 * i_ / x.shape[2]))
 
-
-
-
-        x = tf.expand_dims(x, 0)
-
+        x = x + tf.cast(positional_encoding, tf.float32)
+        x_1 = self.conv1(x)
+        x_1 = self.batch_norm(x_1)
         x_20 = self.conv20(x)
         x_20 = self.batch_norm(x_20)
         x_60 = self.conv60(x)
         x_60 = self.batch_norm(x_60)
 
-        x = x + x_20 + x_60
+        x = x_1 + x_20 + x_60
         x = self.relu(x)
         x = self.conv(x)
         x = self.batch_norm(x)
-        x = self.conv1x1(x)
         return self.flatten(x)
 
 
 class ParamNetwork(Model):
-    def __init__(self, env, dim_hidden=[64, 32, 16]):
+    def __init__(self, a_dim, dim_hidden=[64, 32, 16]):
         super(ParamNetwork, self).__init__()
-        self.feature_net = FeatureNetwork(env)
+        self.feature_net = FeatureNetwork()
         self.dim_hidden = dim_hidden
 
         self.hidden_layer = dict()
         for i, dim_h in enumerate(dim_hidden):
             self.hidden_layer['h' + str(i + 1)] = Dense(dim_h, activation='relu')
 
-        dim_output = self.shared_net.dim_output
-        self.output_layer_actor = Dense(dim_output, activation='sigmoid')
+        self.output_layer_actor = Dense(a_dim, activation='sigmoid')
         self.output_layer_critic = Dense(1, activation='linear')
 
     @property
@@ -97,16 +144,19 @@ class ParamNetwork(Model):
             x = self.hidden_layer['h' + str(i + 1)](x)
         x_a = self.output_layer_actor(x)
         x_c = self.output_layer_critic(x)
-        return x_a / tf.reduce_sum(x_a, axis=1, keepdims=True), x_c
+        return x_a, x_c
+        # return x_a / tf.reduce_sum(x_a, axis=1, keepdims=True), x_c
 
 
-class PPO:
+class MetaPPO:
     def __init__(self, env):
         self.discrete = False
         self.s_dim = env.observation_space.shape
         if len(env.observation_space.shape) > 0:
             self.a_dim = env.action_space.shape[0]
             self.a_bound = (env.action_space.high - env.action_space.low) / 2.
+            self.a_min = env.action_space.low
+            self.a_max = env.action_space.high
         else:
             self.a_dim = env.action_space.n
 
@@ -121,6 +171,7 @@ class PPO:
         self.meta_optimizer = tf.optimizers.Adam(META_LR)
         self.optimizer = tf.optimizers.Adam(LR)
 
+        self.global_step = 0
         self._initialize(env.reset())
 
     def _initialize(self, s):
@@ -137,7 +188,15 @@ class PPO:
             action = self.dist.sample({'mean': mu, 'log_std': self.log_sigma})
         else:
             action = mu
-        return action, value_
+        return self.action_to_weight_zero(action), value_
+
+    def action_to_weight_linear(self, action):
+        a_positive = action - tf.math.reduce_min(action) + self.a_min
+        return a_positive / tf.reduce_sum(a_positive, axis=1, keepdims=True)
+
+    def action_to_weight_zero(self, action):
+        a_positive = tf.clip_by_value(action, self.a_min, self.a_max)
+        return a_positive
 
     def grad_loss(self, trajectory):
         loss_c_object = tf.keras.losses.MeanSquaredError()
@@ -170,6 +229,182 @@ class PPO:
         self.inner_optimizer.apply_gradients(zip(grad_loss_support_a, self.actor_net.trainable_variables))
         self.inner_optimizer.apply_gradients(zip(grad_loss_support_c, self.critic_net.trainable_variables))
         # print(self.actor_net.trainable_variables[0])
+
+    def polynomial_epsilon_decay(self, learning_rate, global_step, decay_steps, end_learning_rate, power):
+        global_step_ = min(global_step, decay_steps)
+        decayed_learning_rate = (learning_rate - end_learning_rate) * (1 - global_step_ / decay_steps) ** (power) \
+                                + end_learning_rate
+
+        return decayed_learning_rate
+
+    def update(self, s_batch, a_batch, r_batch, adv_batch):
+        start = time.time()
+        e_time = []
+
+        self.assign_old_network()
+
+        for epoch in range(EPOCHS):
+            idx = np.arange(len(s_batch))
+            np.random.shuffle(idx)
+
+            loss_per_epoch = 0
+            for i in range(len(s_batch) // MINIBATCH):
+                epsilon_decay = self.polynomial_epsilon_decay(0.1, self.global_step, 1e5, 0.01, power=0.0)
+                s_mini = s_batch[idx[i * MINIBATCH: (i + 1) * MINIBATCH]]
+                a_mini = a_batch[idx[i * MINIBATCH: (i + 1) * MINIBATCH]]
+                r_mini = r_batch[idx[i * MINIBATCH: (i + 1) * MINIBATCH]]
+                adv_mini = adv_batch[idx[i * MINIBATCH: (i + 1) * MINIBATCH]]
+                with tf.GradientTape() as tape:
+                    mu_old, v_old = self.old_param_network(s_mini)
+                    mu, v = self.param_network(s_mini)
+                    ratio = self.dist.likelihood_ratio_sym(
+                        a_mini,
+                        {'mean': mu_old * self.a_bound, 'log_std': self.old_log_sigma},
+                        {'mean': mu * self.a_bound, 'log_std': self.log_sigma})
+                    # ratio = tf.maximum(logli, 1e-6) / tf.maximum(old_logli, 1e-6)
+                    ratio = tf.clip_by_value(ratio, 0, 10)
+                    surr1 = adv_mini.squeeze() * ratio
+                    surr2 = adv_mini.squeeze() * tf.clip_by_value(ratio, 1 - epsilon_decay, 1 + epsilon_decay)
+                    loss_pi = - tf.reduce_mean(tf.minimum(surr1, surr2))
+
+                    clipped_value_estimate = v_old + tf.clip_by_value(v - v_old, -epsilon_decay, epsilon_decay)
+                    loss_v1 = tf.math.squared_difference(clipped_value_estimate, r_mini)
+                    loss_v2 = tf.math.squared_difference(v, r_mini)
+                    loss_v = tf.reduce_mean(tf.maximum(loss_v1, loss_v2)) * 0.5
+
+                    entropy = self.dist.entropy({'mean': mu, 'log_std': self.log_sigma})
+                    pol_entpen = -ENTROPY_BETA * tf.reduce_mean(entropy)
+
+                    loss_sum = tf.reduce_mean(tf.maximum(tf.reduce_sum(a_mini, axis=1) - 1, 0) + tf.maximum(0.99 - tf.reduce_sum(a_mini, axis=1), 0)) * 100
+
+                    loss = loss_pi + loss_v * VF_COEFF + pol_entpen + loss_sum
+
+
+                grad = tape.gradient(loss, self.param_network.trainable_variables + [self.log_sigma])
+                self.optimizer.apply_gradients(zip(grad, self.param_network.trainable_variables + [self.log_sigma]))
+
+                print("{} {} {} {}".format(loss_pi, loss_v * VF_COEFF, pol_entpen, loss_sum))
+                loss_per_epoch = loss_per_epoch + loss
+                # print("epoch: {} - {}/{} ({:.3f}%),  loss: {:.8f}".format(epoch, i, len(s_batch) // MINIBATCH,
+                #                                                           i / (len(s_batch) // MINIBATCH) * 100., loss))
+                # if i % 10 == 0:
+                #     print(grad[-1])
+
+                self.global_step += 1
+
+            print("epoch: {} - loss: {}".format(epoch, loss_per_epoch / (len(s_batch) // MINIBATCH) * 100))
+
+    def save_model(self, f_name):
+        w_dict = {}
+        w_dict['param_network'] = self.param_network.get_weights()
+        w_dict['log_sigma'] = self.log_sigma.numpy()
+        w_dict['global_step'] = self.global_step
+
+        # f_name = os.path.join(model_path, model_name)
+        with open(f_name, 'wb') as f:
+            pickle.dump(w_dict, f)
+
+        print("model saved. (path: {})".format(f_name))
+
+    def load_model(self, f_name):
+        # f_name = os.path.join(model_path, model_name)
+        with open(f_name, 'rb') as f:
+            w_dict = pickle.load(f)
+        self.param_network.set_weights(w_dict['param_network'])
+        self.log_sigma.assign(w_dict['log_sigma'])
+        self.global_step = w_dict['global_step']
+
+        print("model loaded. (path: {})".format(f_name))
+
+
+
+
+def main():
+    model_name = 'meta_ppo_model_shared'
+    ENVIRONMENT = 'PortfolioEnv'
+
+    if ENVIRONMENT == 'PortfolioEnv':
+        env = PortfolioEnv()
+
+    TIMESTAMP = datetime.now().strftime('%Y%m%d-%H%M%S')
+    SUMMARY_DIR = os.path.join('./', 'PPO', ENVIRONMENT, TIMESTAMP)
+
+    model = MetaPPO(env)
+
+    f_name = './{}.pkl'.format(model_name)
+    if os.path.exists(f_name):
+        model.load_model(f_name)
+
+    n_envs = 16
+    t_start = 250
+    T = env.len_timeseries
+    t = t_start
+    for t in range(t_start, T):
+        t_batch = 0     # current memory size
+        buffer_s, buffer_a, buffer_r, buffer_v, buffer_terminal = [], [], [], [], []
+
+        rolling_r = RunningStats()
+
+        EP_MAX = 100
+        BATCH = 128
+        for ep in range(EP_MAX + 1):
+            print("ep: {}".format(ep))
+            env_samples = np.random.choice(np.arange(t), n_envs, replace=True)
+            for env_t in env_samples:
+                # print(env_t)
+                s = env.reset(env_t)
+                t_step = 0  # trajectory 길이
+                done = False
+
+                a, v = model.evaluate_state(s, stochastic=True)
+
+                if t_batch == BATCH:
+                    rewards = np.array(buffer_r)
+                    rolling_r.update(rewards)
+                    rewards = np.clip(rewards / rolling_r.std, -10, 10)
+
+                    v_final = [v * (1 - done)]
+                    values = np.array(buffer_v + v_final).squeeze()
+                    terminals = np.array(buffer_terminal + [done])
+
+                    delta = rewards + GAMMA * values[1:] * (1 - terminals[1:]) - values[:-1]
+                    advantage = discount(delta, GAMMA * LAMBDA, terminals)
+                    returns = advantage + np.array(buffer_v).squeeze()
+                    advantage = (advantage - advantage.mean()) / np.maximum(advantage.std(), 1e-6)
+
+                    s_batch = np.reshape(buffer_s, (t_batch,) + model.s_dim)
+                    a_batch = np.vstack(buffer_a)
+                    r_batch = np.vstack(returns)
+                    adv_batch = np.vstack(advantage)
+                    model.update(s_batch, a_batch, r_batch, adv_batch)
+                    buffer_s, buffer_a, buffer_r, buffer_v, buffer_terminal = [], [], [], [], []
+
+                    t_batch = 0
+
+                    model.save_model(f_name)
+
+                a, v = model.evaluate_state(s, stochastic=True)
+                buffer_s.append(s)
+                buffer_a.append(a)
+                buffer_v.append(v)
+                buffer_terminal.append(done)
+
+                s, r, info, done = env.step(np.squeeze(a))
+                buffer_r.append(r)
+                t_step += 1
+                t_batch += 1
+                if (t == env_t + t_step) or done:
+                    print(a)
+                    continue
+
+
+
+
+
+
+
+
+
 
 
 class DDPG:

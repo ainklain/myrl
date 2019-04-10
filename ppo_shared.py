@@ -148,8 +148,8 @@ class PPO(object):
         return action, value_
 
     def polynomial_epsilon_decay(self, learning_rate, global_step, decay_steps, end_learning_rate, power):
-        global_step = min(self.global_step, decay_steps)
-        decayed_learning_rate = (learning_rate - end_learning_rate) * (1 - global_step / decay_steps) ** (power) \
+        global_step_ = min(global_step, decay_steps)
+        decayed_learning_rate = (learning_rate - end_learning_rate) * (1 - global_step_ / decay_steps) ** (power) \
                                 + end_learning_rate
 
         return decayed_learning_rate
@@ -207,20 +207,20 @@ class PPO(object):
 
             print("epoch: {} - loss: {}".format(epoch, loss_per_epoch / (len(s_batch) // MINIBATCH) * 100))
 
-    def save_model(self, model_path, model_name='{}.pkl'.format(model_name)):
+    def save_model(self, f_name):
         w_dict = {}
         w_dict['param_network'] = self.param_network.get_weights()
         w_dict['log_sigma'] = self.log_sigma.numpy()
         w_dict['global_step'] = self.global_step
 
-        f_name = os.path.join(model_path, model_name)
+        # f_name = os.path.join(model_path, model_name)
         with open(f_name, 'wb') as f:
             pickle.dump(w_dict, f)
 
         print("model saved. (path: {})".format(f_name))
 
-    def load_model(self, model_path, model_name='{}.pkl'.format(model_name)):
-        f_name = os.path.join(model_path, model_name)
+    def load_model(self, f_name):
+        # f_name = os.path.join(model_path, model_name)
         with open(f_name, 'rb') as f:
             w_dict = pickle.load(f)
         self.param_network.set_weights(w_dict['param_network'])
@@ -242,8 +242,10 @@ def main():
     TIMESTAMP = datetime.now().strftime('%Y%m%d-%H%M%S')
     SUMMARY_DIR = os.path.join('./', 'PPO', ENVIRONMENT, TIMESTAMP)
     ppo = PPO(env)
-    if os.path.exists('./{}.pkl'.format(model_name)):
-        ppo.load_model('./')
+
+    f_name = './{}.pkl'.format(model_name)
+    if os.path.exists(f_name):
+        ppo.load_model(f_name)
 
     t, terminal = 0, False
     buffer_s, buffer_a, buffer_r, buffer_v, buffer_terminal = [], [], [], [], []
@@ -305,7 +307,7 @@ def main():
             t += 1
 
             if terminal:
-                ppo.save_model('./')
+                ppo.save_model(f_name)
                 break
 
     env.close()
@@ -314,8 +316,8 @@ def main():
 
     env = gym.make(ENVIRONMENT)
     ppo = PPO(env)
-    if os.path.exists('./{}.pkl'.format(model_name)):
-        ppo.load_model('./')
+    if os.path.exists(f_name):
+        ppo.load_model(f_name)
 
     t, terminal = 0, False
     for episode in range(5 + 1):
