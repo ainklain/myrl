@@ -345,8 +345,8 @@ def main():
 
         rolling_r = RunningStats()
 
-        EP_MAX = 100
-        BATCH = 128
+        EP_MAX = 10000
+        BATCH = 512
         for ep in range(EP_MAX + 1):
             print("ep: {}".format(ep))
             env_samples = np.random.choice(np.arange(t), n_envs, replace=True)
