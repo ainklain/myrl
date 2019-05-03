@@ -149,7 +149,7 @@ class ParamNetwork(Model):
 
 
 class MetaPPO:
-    def __init__(self, env):
+    def __init__(self, env, batch_size=128):
         self.discrete = False
         self.s_dim = env.observation_space.shape
         if len(env.observation_space.shape) > 0:
@@ -171,6 +171,8 @@ class MetaPPO:
         self.meta_optimizer = tf.optimizers.Adam(META_LR)
         self.optimizer = tf.optimizers.Adam(LR)
 
+        self.sampler = Sampler(env, batch_size=batch_size)
+
         self.global_step = 0
         self._initialize(env.reset())
 
@@ -188,7 +190,7 @@ class MetaPPO:
             action = self.dist.sample({'mean': mu, 'log_std': self.log_sigma})
         else:
             action = mu
-        return self.action_to_weight_zero(action), value_
+        return self.action_to_weight_linear(action), value_
 
     def action_to_weight_linear(self, action):
         a_positive = action - tf.math.reduce_min(action) + self.a_min
@@ -198,7 +200,7 @@ class MetaPPO:
         a_positive = tf.clip_by_value(action, self.a_min, self.a_max)
         return a_positive
 
-    def grad_loss(self, trajectory):
+    def grad_loss_old(self, trajectory):
         loss_c_object = tf.keras.losses.MeanSquaredError()
 
         # optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
@@ -237,18 +239,41 @@ class MetaPPO:
 
         return decayed_learning_rate
 
-    def update(self, s_batch, a_batch, r_batch, adv_batch):
-        start = time.time()
-        e_time = []
+    def grad_loss_old(self, trajectory):
+        loss_c_object = tf.keras.losses.MeanSquaredError()
 
+        # optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
+
+        o_batch, a_batch, r_batch, o_batch_ = self._trajectory_to_batch(trajectory, shuffle=True)
+        o_processed = self.actor_net.shared_net(o_batch).numpy()
+        o_processed_ = self.target_actor_net.shared_net(o_batch_).numpy()
+        with tf.GradientTape() as tape_a:
+            with tf.GradientTape() as tape_c:
+                q_target = r_batch + self.gamma * self.target_critic_net(o_processed_, self.target_actor_net(o_batch_))
+                q_pred_for_c = self.critic_net(o_processed, a_batch)
+                q_pred = self.critic_net(o_processed, self.actor_net(o_batch))
+
+                loss_a = -tf.reduce_mean(q_pred)
+                loss_c = loss_c_object(q_target, q_pred_for_c)
+
+        grad_loss_a = tape_a.gradient(loss_a, self.actor_net.trainable_variables)
+        grad_loss_c = tape_c.gradient(loss_c, self.critic_net.trainable_variables)
+
+        return grad_loss_a, grad_loss_c
+
+    def metatrain(self, t, n_envs):
         self.assign_old_network()
+        env_samples = np.random.choice(np.arange(t), n_envs, replace=True)
 
-        for epoch in range(EPOCHS):
+        meta_grad = None
+        for env_i, env_t in enumerate(env_samples):
+            s_batch, a_batch, r_batch, adv_batch = self.sampler.get_trajectories(env_t, t, self)
+
             idx = np.arange(len(s_batch))
             np.random.shuffle(idx)
 
-            loss_per_epoch = 0
-            for i in range(len(s_batch) // MINIBATCH):
+            batch_count = len(s_batch) // MINIBATCH
+            for i in range(batch_count):
                 epsilon_decay = self.polynomial_epsilon_decay(0.1, self.global_step, 1e5, 0.01, power=0.0)
                 s_mini = s_batch[idx[i * MINIBATCH: (i + 1) * MINIBATCH]]
                 a_mini = a_batch[idx[i * MINIBATCH: (i + 1) * MINIBATCH]]
@@ -275,24 +300,25 @@ class MetaPPO:
                     entropy = self.dist.entropy({'mean': mu, 'log_std': self.log_sigma})
                     pol_entpen = -ENTROPY_BETA * tf.reduce_mean(entropy)
 
-                    loss_sum = tf.reduce_mean(tf.maximum(tf.reduce_sum(a_mini, axis=1) - 1, 0) + tf.maximum(0.99 - tf.reduce_sum(a_mini, axis=1), 0)) * 100
+                    loss_sum = tf.reduce_mean(tf.maximum(tf.reduce_sum(a_mini, axis=1) - 1, 0) + tf.maximum(
+                        0.99 - tf.reduce_sum(a_mini, axis=1), 0)) * 100
 
                     loss = loss_pi + loss_v * VF_COEFF + pol_entpen + loss_sum
 
+                minigrad = tape.gradient(loss, self.param_network.trainable_variables + [self.log_sigma])
+                if i == 0:
+                    grad = [minigrad[j] / batch_count for j in range(len(minigrad))]
+                else:
+                    grad = [grad[j] + minigrad[j] / batch_count for j in range(len(minigrad))]
 
-                grad = tape.gradient(loss, self.param_network.trainable_variables + [self.log_sigma])
-                self.optimizer.apply_gradients(zip(grad, self.param_network.trainable_variables + [self.log_sigma]))
+            self.
+            print("env_i: {} / env_t: {}".format(env_i, env_t))
+            if meta_grad is None:
+                meta_grad = [grad[k] / n_envs for k in range(len(grad))]
+            else:
+                meta_grad = [meta_grad[k] + grad[k] / n_envs for k in range(len(grad))]
 
-                print("{} {} {} {}".format(loss_pi, loss_v * VF_COEFF, pol_entpen, loss_sum))
-                loss_per_epoch = loss_per_epoch + loss
-                # print("epoch: {} - {}/{} ({:.3f}%),  loss: {:.8f}".format(epoch, i, len(s_batch) // MINIBATCH,
-                #                                                           i / (len(s_batch) // MINIBATCH) * 100., loss))
-                # if i % 10 == 0:
-                #     print(grad[-1])
-
-                self.global_step += 1
-
-            print("epoch: {} - loss: {}".format(epoch, loss_per_epoch / (len(s_batch) // MINIBATCH) * 100))
+        self.meta_optimizer.apply_gradients(zip(meta_grad, self.param_network.trainable_variables + [self.log_sigma]))
 
     def save_model(self, f_name):
         w_dict = {}
@@ -317,6 +343,53 @@ class MetaPPO:
         print("model loaded. (path: {})".format(f_name))
 
 
+class Sampler:
+    def __init__(self, env, batch_size=128):
+        self.env = env
+        self.batch_size = batch_size
+
+    def get_trajectories(self, env_t, t, model):
+        buffer_s, buffer_a, buffer_v, buffer_r, buffer_done = [], [], [], [], []
+        rolling_r = RunningStats()
+
+        s = self.env.reset(env_t)
+        done = False
+        t_step = 0
+        while len(buffer_r) < self.batch_size:
+            a, v = model.evaluate_state(s, stochastic=True)
+
+            buffer_s.append(s)
+            buffer_a.append(a)
+            buffer_v.append(tf.squeeze(v))
+            buffer_done.append(done)
+
+            a = tf.clip_by_value(a, self.env.action_space.low, self.env.action_space.high)
+            s, r, _, done = self.env.step(np.squeeze(a))
+            buffer_r.append(r)
+            t_step += 1
+            if (t_step == t - env_t) or done:
+                s = self.env.reset(env_t)
+                done = False
+                t_step = 0
+
+        rewards = np.array(buffer_r)
+        rolling_r.update(rewards)
+        rewards = np.clip(rewards / rolling_r.std, -10, 10)
+
+        v_final = [tf.squeeze(v) * (1 - done)]
+        values = np.array(buffer_v + v_final)
+        dones = np.array(buffer_done + [done])
+
+        # Generalized Advantage Estimation
+        delta = rewards + GAMMA * values[1:] * (1 - dones[1:]) - values[:-1]
+        adv = discount(delta, GAMMA * LAMBDA, dones)
+        returns = adv + np.array(buffer_v)
+        adv = (adv - adv.mean()) / np.maximum(adv.std(), 1e-6)
+
+        s_batch, a_batch, r_batch, adv_batch = np.reshape(buffer_s, (self.batch_size,) + model.s_dim), \
+                                               np.vstack(buffer_a), np.vstack(returns), np.vstack(adv)
+
+        return s_batch, a_batch, r_batch, adv_batch
 
 
 def main():
@@ -329,7 +402,8 @@ def main():
     TIMESTAMP = datetime.now().strftime('%Y%m%d-%H%M%S')
     SUMMARY_DIR = os.path.join('./', 'PPO', ENVIRONMENT, TIMESTAMP)
 
-    model = MetaPPO(env)
+    BATCH = 128
+    model = MetaPPO(env, batch_size=BATCH)
 
     f_name = './{}.pkl'.format(model_name)
     if os.path.exists(f_name):
@@ -340,62 +414,13 @@ def main():
     T = env.len_timeseries
     t = t_start
     for t in range(t_start, T):
-        t_batch = 0     # current memory size
-        buffer_s, buffer_a, buffer_r, buffer_v, buffer_terminal = [], [], [], [], []
-
-        rolling_r = RunningStats()
-
         EP_MAX = 10000
-        BATCH = 512
         for ep in range(EP_MAX + 1):
             print("ep: {}".format(ep))
-            env_samples = np.random.choice(np.arange(t), n_envs, replace=True)
-            for env_t in env_samples:
-                # print(env_t)
-                s = env.reset(env_t)
-                t_step = 0  # trajectory 길이
-                done = False
 
-                a, v = model.evaluate_state(s, stochastic=True)
 
-                if t_batch == BATCH:
-                    rewards = np.array(buffer_r)
-                    rolling_r.update(rewards)
-                    rewards = np.clip(rewards / rolling_r.std, -10, 10)
 
-                    v_final = [v * (1 - done)]
-                    values = np.array(buffer_v + v_final).squeeze()
-                    terminals = np.array(buffer_terminal + [done])
 
-                    delta = rewards + GAMMA * values[1:] * (1 - terminals[1:]) - values[:-1]
-                    advantage = discount(delta, GAMMA * LAMBDA, terminals)
-                    returns = advantage + np.array(buffer_v).squeeze()
-                    advantage = (advantage - advantage.mean()) / np.maximum(advantage.std(), 1e-6)
-
-                    s_batch = np.reshape(buffer_s, (t_batch,) + model.s_dim)
-                    a_batch = np.vstack(buffer_a)
-                    r_batch = np.vstack(returns)
-                    adv_batch = np.vstack(advantage)
-                    model.update(s_batch, a_batch, r_batch, adv_batch)
-                    buffer_s, buffer_a, buffer_r, buffer_v, buffer_terminal = [], [], [], [], []
-
-                    t_batch = 0
-
-                    model.save_model(f_name)
-
-                a, v = model.evaluate_state(s, stochastic=True)
-                buffer_s.append(s)
-                buffer_a.append(a)
-                buffer_v.append(v)
-                buffer_terminal.append(done)
-
-                s, r, info, done = env.step(np.squeeze(a))
-                buffer_r.append(r)
-                t_step += 1
-                t_batch += 1
-                if (t == env_t + t_step) or done:
-                    print(a)
-                    continue
 
 
 
