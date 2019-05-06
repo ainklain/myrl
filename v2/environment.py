@@ -22,7 +22,7 @@ class PortfolioSim(object):
     def __init__(self,
                  asset_list,
                  macro_list=None,
-                 max_path_length=250,
+                 max_path_length=512,
                  trading_cost=1e-3):
         self.trading_cost = trading_cost
         self.max_path_length = max_path_length
