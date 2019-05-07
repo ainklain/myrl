@@ -349,7 +349,7 @@ class Sampler:
     def __init__(self, env):
         self.env = env
 
-    def get_trajectories(self, model, begin_t=None, end_t=None):
+    def get_trajectories(self, model, begin_t=None, end_t=None, render=False):
         buffer_s, buffer_a, buffer_v, buffer_r, buffer_done = [], [], [], [], []
         rolling_r = RunningStats()
 
@@ -370,7 +370,11 @@ class Sampler:
             s, r, _, done = self.env.step(np.squeeze(a))
             buffer_r.append(r)
             t_step += 1
+
+            # print(t_step)
+            time.sleep(1)
             if done:
+                self.env.render()
                 s = self.env.reset(begin_t)
                 done = False
                 t_step = 0
@@ -392,6 +396,8 @@ class Sampler:
         s_batch, a_batch, r_batch, adv_batch = np.reshape(buffer_s, (batch_size,) + model.s_dim), \
                                                np.vstack(buffer_a), np.vstack(returns), np.vstack(adv)
 
+
+
         return s_batch, a_batch, r_batch, adv_batch
 
 
@@ -410,6 +416,7 @@ def main():
     K = 128     # target set 길이
     model = MetaPPO(env, M=M, K=K)
 
+    time.sleep(1)
     f_name = './{}.pkl'.format(model_name)
     if os.path.exists(f_name):
         model.load_model(f_name)

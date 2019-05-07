@@ -106,7 +106,6 @@ class ParamNetwork(Model):
         x = self.feature_net(x)
         x = self.dense1(x)
         x = self.dense2(x)
-        x = self.dense_mu(x)
         return self.dense_mu(x), self.dense_critic(x)
 
 

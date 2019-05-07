@@ -2,7 +2,10 @@
 import gym
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 from copy import deepcopy
+import seaborn as sns
+
 
 
 def factor_history_csv():
@@ -135,6 +138,7 @@ class PortfolioSim(object):
         exported_data['positions'] = self.positions
         exported_data['costs'] = self.costs
         exported_data['actions'] = self.actions
+        exported_data['rewards_history'] = self.rewards_history
 
         return deepcopy(exported_data)
 
@@ -227,13 +231,49 @@ class PortfolioEnv(gym.Env):
                       (obs.values >= 0) * 1. + (obs.values < 0) * -1.),
                      axis=-1)
         self.i_step += 1
+
+        self.render_call = 0
+
         return s
 
-    def render(self, mode='human', close=False):
-        return self._render(mode=mode,  close=close)
+    def render(self, mode='human', close=False, insample=False):
+        return self._render(mode=mode,  close=close, insample=insample)
 
-    def _render(self, mode='human', close=False):
-        pass
+    def _render(self, mode='human', close=False, insample=False):
+        if mode == 'human':
+            if self.render_call == 0:
+                if hasattr(self, 'fig'):
+                    plt.close(self.fig)
+                self.fig = plt.figure()
+                self.ax1, self.ax2, self.ax3, self.ax4 = self.fig.subplots(4, 1)
+                self.render_call += 1
+            self._get_image()
+
+    def _get_image(self):
+        import io
+        from PIL import Image
+
+        render_data = self.sim.export()
+        last_step = render_data['last_step']
+        x_ = np.arange(last_step)
+        self.ax1.plot(x_, render_data['navs'][:last_step], color='k')
+        self.ax1.plot(x_, render_data['ew_nav'][:last_step], color='r')
+
+        actions_t = np.transpose(render_data['actions'][:last_step])
+        pal = sns.color_palette("hls", 19)
+        self.ax2.stackplot(x_, actions_t, colors=pal)
+
+        asset_returns_df = render_data['asset_returns_df'][:last_step]
+        asset_list = asset_returns_df.columns
+        asset_cum_returns_t = np.cumprod(1 + np.transpose(asset_returns_df.values), axis=1)
+        for i in range(len(asset_list)):
+            self.ax3.plot(x_, asset_cum_returns_t[i], color=pal[i])
+
+        self.ax4.plot(x_, render_data['rewards_history'][:last_step])
+
+
+
+
         # if close:
         #     return
         # if mode == 'ansi':
