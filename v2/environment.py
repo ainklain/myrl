@@ -183,7 +183,7 @@ class PortfolioEnv(gym.Env):
                                 max_path_length=self.max_path_length,
                                 trading_cost=self.trading_cost)
 
-        self.action_space = gym.spaces.Box(0, 1, shape=(len(self.asset_list), ), dtype=np.float32)
+        self.action_space = gym.spaces.Box(0.01, 0.99, shape=(len(self.asset_list), ), dtype=np.float32)
         self.observation_space = gym.spaces.Box(low=-np.inf,
                                                 high=np.inf,
                                                 shape=(self.input_window_length, n_risky_asset + len(self.macro_list), 3),
@@ -236,10 +236,10 @@ class PortfolioEnv(gym.Env):
 
         return s
 
-    def render(self, mode='human', close=False, insample=False):
-        return self._render(mode=mode,  close=close, insample=insample)
+    def render(self, mode='human', close=False, statistics=False):
+        return self._render(mode=mode,  close=close, statistics=statistics)
 
-    def _render(self, mode='human', close=False, insample=False):
+    def _render(self, mode='human', close=False, statistics=False):
         if mode == 'human':
             if self.render_call == 0:
                 # if hasattr(self, 'fig'):
@@ -248,7 +248,10 @@ class PortfolioEnv(gym.Env):
                 self.ax1, self.ax2, self.ax3, self.ax4 = self.fig.subplots(4, 1)
                 self.render_call += 1
 
-            self._get_image()
+
+            self._get_image(statistics)
+
+
             if self.render_call == 0:
                 self.ax3.legend(loc='lower center', bbox_to_anchor=(0.5, -0.05), ncol=3, fancybox=True, shadow=True)
                 self.render_call += 1
@@ -257,7 +260,7 @@ class PortfolioEnv(gym.Env):
             self.fig.canvas.draw()
             self.fig.canvas.flush_events()
 
-    def _get_image(self):
+    def _get_image(self, statistics=False):
         import io
         from PIL import Image
 
@@ -279,18 +282,9 @@ class PortfolioEnv(gym.Env):
 
         self.ax4.plot(x_, render_data['rewards_history'][:last_step])
 
+        if statistics:
+            pass
 
-        # if close:
-        #     return
-        # if mode == 'ansi':
-        #     pprint(self.infos[-1])
-        # elif mode == 'human':
-        #     if self.render_call == 0:
-        #         self.fig = plt.figure()
-        #         self.ax1, self.ax2, self.ax3 = self.fig.subplots(3, 1)
-        #         self.render_call += 1
-        #     self._get_image()
-        #     if self.sim.step % 20 == 0:
 
 
     def preprocess(self, obs):
