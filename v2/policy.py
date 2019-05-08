@@ -179,6 +179,9 @@ class MetaPPO:
         self.global_step = 0
         self._initialize(env.reset())
 
+        self.optim_param_net_wgt = self.param_network.get_weights()
+        self.optim_log_sigma_wgt = self.log_sigma.numpy()
+
     def _initialize(self, s):
         _ = self.param_network(s)
         _ = self.old_param_network(s)
@@ -202,38 +205,6 @@ class MetaPPO:
     def action_to_weight_zero(self, action):
         a_positive = tf.clip_by_value(action, self.a_min, self.a_max)
         return a_positive
-
-    def grad_loss_old(self, trajectory):
-        loss_c_object = tf.keras.losses.MeanSquaredError()
-
-        # optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
-
-        o_batch, a_batch, r_batch, o_batch_ = self._trajectory_to_batch(trajectory, shuffle=True)
-        o_processed = self.actor_net.shared_net(o_batch).numpy()
-        o_processed_ = self.target_actor_net.shared_net(o_batch_).numpy()
-        with tf.GradientTape() as tape_a:
-            with tf.GradientTape() as tape_c:
-                q_target = r_batch + self.gamma * self.target_critic_net(o_processed_, self.target_actor_net(o_batch_))
-                q_pred_for_c = self.critic_net(o_processed, a_batch)
-                q_pred = self.critic_net(o_processed, self.actor_net(o_batch))
-
-                loss_a = -tf.reduce_mean(q_pred)
-                loss_c = loss_c_object(q_target, q_pred_for_c)
-
-        grad_loss_a = tape_a.gradient(loss_a, self.actor_net.trainable_variables)
-        grad_loss_c = tape_c.gradient(loss_c, self.critic_net.trainable_variables)
-
-        return grad_loss_a, grad_loss_c
-
-    def fast_train(self, tr_support):
-        # tr_support, _ = self.get_trajectory(env_t - self.args.M, 'support')
-        grad_loss_support_a, grad_loss_support_c = self.grad_loss(tr_support)
-
-        # print(self.actor_net.trainable_variables[0])
-        # print(grad_loss_support_a[0])
-        self.inner_optimizer.apply_gradients(zip(grad_loss_support_a, self.actor_net.trainable_variables))
-        self.inner_optimizer.apply_gradients(zip(grad_loss_support_c, self.critic_net.trainable_variables))
-        # print(self.actor_net.trainable_variables[0])
 
     def polynomial_epsilon_decay(self, learning_rate, global_step, decay_steps, end_learning_rate, power):
         global_step_ = min(global_step, decay_steps)
@@ -297,21 +268,13 @@ class MetaPPO:
         self.assign_old_network()
 
         meta_grad = None
-        param_network_wgt = self.param_network.get_weights()
-        log_sigma_wgt = self.log_sigma.numpy()
 
         for env_i, env_t in enumerate(env_samples):
-            self.param_network.set_weights(param_network_wgt)
-            self.log_sigma.assign(log_sigma_wgt)
+            self.fast_train(env_t)
+            trajectory_target = self.sampler.get_trajectories(self, env_t, env_t + self.K)
 
-            trajectory_sample = self.sampler.get_trajectories(self, env_t, env_t + self.M)
-            grad = self.grad_loss(trajectory_sample)
-            self.optimizer.apply_gradients(zip(grad, self.param_network.trainable_variables + [self.log_sigma]))
-
-            trajectory_target = self.sampler.get_trajectories(self, env_t + self.M, env_t + self.M + self.K)
-
-            self.param_network.set_weights(param_network_wgt)
-            self.log_sigma.assign(log_sigma_wgt)
+            self.param_network.set_weights(self.optim_param_net_wgt)
+            self.log_sigma.assign(self.optim_log_sigma_wgt)
 
             grad = self.grad_loss(trajectory_target)
             print("env_i: {} / env_t: {}".format(env_i, env_t))
@@ -322,10 +285,23 @@ class MetaPPO:
 
         self.meta_optimizer.apply_gradients(zip(meta_grad, self.param_network.trainable_variables + [self.log_sigma]))
 
+        self.optim_param_net_wgt = self.param_network.get_weights()
+        self.optim_log_sigma_wgt = self.log_sigma.numpy()
+
+    def fast_train(self, env_t):
+        self.param_network.set_weights(self.optim_param_net_wgt)
+        self.log_sigma.assign(self.optim_log_sigma_wgt)
+
+        trajectory_sample = self.sampler.get_trajectories(self, env_t - self.M, env_t, render=False)
+        grad = self.grad_loss(trajectory_sample)
+        self.optimizer.apply_gradients(zip(grad, self.param_network.trainable_variables + [self.log_sigma]))
+
     def save_model(self, f_name):
         w_dict = {}
-        w_dict['param_network'] = self.param_network.get_weights()
-        w_dict['log_sigma'] = self.log_sigma.numpy()
+        # w_dict['param_network'] = self.param_network.get_weights()
+        # w_dict['log_sigma'] = self.log_sigma.numpy()
+        w_dict['param_network'] = self.optim_param_net_wgt
+        w_dict['log_sigma'] = self.optim_log_sigma_wgt
         w_dict['global_step'] = self.global_step
 
         # f_name = os.path.join(model_path, model_name)
@@ -338,8 +314,11 @@ class MetaPPO:
         # f_name = os.path.join(model_path, model_name)
         with open(f_name, 'rb') as f:
             w_dict = pickle.load(f)
-        self.param_network.set_weights(w_dict['param_network'])
-        self.log_sigma.assign(w_dict['log_sigma'])
+
+        self.optim_param_net_wgt = w_dict['param_network']
+        self.optim_log_sigma_wgt = w_dict['log_sigma']
+        self.param_network.set_weights(self.optim_param_net_wgt)
+        self.log_sigma.assign(self.optim_log_sigma_wgt)
         self.global_step = w_dict['global_step']
 
         print("model loaded. (path: {})".format(f_name))
@@ -374,7 +353,6 @@ class Sampler:
             # print(t_step)
             time.sleep(1)
             if done:
-                self.env.render()
                 s = self.env.reset(begin_t)
                 done = False
                 t_step = 0
@@ -396,7 +374,8 @@ class Sampler:
         s_batch, a_batch, r_batch, adv_batch = np.reshape(buffer_s, (batch_size,) + model.s_dim), \
                                                np.vstack(buffer_a), np.vstack(returns), np.vstack(adv)
 
-
+        if render:
+            self.env.render()
 
         return s_batch, a_batch, r_batch, adv_batch
 
@@ -407,6 +386,7 @@ def main():
 
     if ENVIRONMENT == 'PortfolioEnv':
         env = PortfolioEnv()
+        main_env = PortfolioEnv()
 
     TIMESTAMP = datetime.now().strftime('%Y%m%d-%H%M%S')
     SUMMARY_DIR = os.path.join('./', 'PPO', ENVIRONMENT, TIMESTAMP)
@@ -414,6 +394,7 @@ def main():
     # BATCH = 128
     M = 256     # support set 길이
     K = 128     # target set 길이
+    test_length = 20
     model = MetaPPO(env, M=M, K=K)
 
     time.sleep(1)
@@ -427,20 +408,42 @@ def main():
 
     T = env.len_timeseries
     t = t_start
-    t_delta = 0
-    for t_delta, t in enumerate(range(t_start, T)):
-        env_samples = np.random.choice(np.arange(initial_t + t_delta), n_envs, replace=True)
+    t_step = 0
 
-        EP_MAX = 10000
-        for ep in range(EP_MAX + 1):
-            print("ep: {}".format(ep))
-            model.metatrain(env_samples)
+    a_bt = []
+    r_bt = []
 
-            if ep % 10 == 0:
-                model.save_model(f_name)
+    s = main_env.reset(t)
+    for t_step, t in enumerate(range(t_start, T - test_length, test_length)):
+        print("t: {}".format(t))
+        env_samples = np.random.choice(M + np.arange(initial_t + t_step * test_length), n_envs, replace=True)
 
+        # # train time
+        # EP_MAX = 10
+        # for ep in range(EP_MAX + 1):
+        #     print("[TRAIN] t: {} / ep: {}".format(t, ep))
+        #     model.metatrain(env_samples)
+        #
+        #     if ep % 10 == 0:
+        #         model.save_model(f_name)
 
+        # test time
+        test_buffer_r = []
+        for n in range(test_length):
+            print("[TEST] t: {} / n_day: {}".format(t, n))
+            model.fast_train(t)
+            a, v = model.evaluate_state(s, stochastic=False)
 
+            a = tf.clip_by_value(a, main_env.action_space.low, main_env.action_space.high)
+            s, r, _, done = main_env.step(np.squeeze(a))
+
+            test_buffer_r.append(r)
+            if done:
+                print('done')
+                break
+
+        if done:
+            break
 
 
 

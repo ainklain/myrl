@@ -300,6 +300,7 @@ def main():
             if not ppo.discrete:
                 a = tf.clip_by_value(a, env.action_space.low, env.action_space.high)
             s, r, terminal, _ = env.step(np.squeeze(a))
+            print(r)
             s = s / 255.
             buffer_r.append(r)
             ep_r += r

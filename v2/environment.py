@@ -242,12 +242,20 @@ class PortfolioEnv(gym.Env):
     def _render(self, mode='human', close=False, insample=False):
         if mode == 'human':
             if self.render_call == 0:
-                if hasattr(self, 'fig'):
-                    plt.close(self.fig)
+                # if hasattr(self, 'fig'):
+                #     plt.close(self.fig)
                 self.fig = plt.figure()
                 self.ax1, self.ax2, self.ax3, self.ax4 = self.fig.subplots(4, 1)
                 self.render_call += 1
+
             self._get_image()
+            if self.render_call == 0:
+                self.ax3.legend(loc='lower center', bbox_to_anchor=(0.5, -0.05), ncol=3, fancybox=True, shadow=True)
+                self.render_call += 1
+                self.ims = []
+
+            self.fig.canvas.draw()
+            self.fig.canvas.flush_events()
 
     def _get_image(self):
         import io
@@ -270,8 +278,6 @@ class PortfolioEnv(gym.Env):
             self.ax3.plot(x_, asset_cum_returns_t[i], color=pal[i])
 
         self.ax4.plot(x_, render_data['rewards_history'][:last_step])
-
-
 
 
         # if close:
