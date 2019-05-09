@@ -129,16 +129,16 @@ class PortfolioSim(object):
     def export(self):
         exported_data = dict()
         exported_data['last_step'] = self.step_count
-        exported_data['asset_returns_df'] = self.assets_return_df
-        exported_data['macro_returns_df'] = self.macros_return_df
-        exported_data['navs'] = self.navs
-        exported_data['nav_returns'] = np.concatenate([[self.navs[0] - 1.], self.navs[1:] / self.navs[:-1] - 1.])
-        exported_data['ew_nav'] = (1 + self.assets_return_df).cumprod(axis=0).mean(axis=1).values
-        exported_data['ew_returns'] = np.concatenate([[exported_data['ew_nav'][0] - 1.], exported_data['ew_nav'][1:] / exported_data['ew_nav'][:-1] - 1.])
-        exported_data['positions'] = self.positions
-        exported_data['costs'] = self.costs
-        exported_data['actions'] = self.actions
-        exported_data['rewards_history'] = self.rewards_history
+        exported_data['asset_returns_df'] = self.assets_return_df[:self.step_count]
+        exported_data['macro_returns_df'] = self.macros_return_df[:self.step_count]
+        exported_data['navs'] = self.navs[:self.step_count]
+        exported_data['nav_returns'] = np.concatenate([[self.navs[0] - 1.], self.navs[1:] / self.navs[:-1] - 1.])[:self.step_count]
+        exported_data['ew_nav'] = (1 + self.assets_return_df).cumprod(axis=0).mean(axis=1).values[:self.step_count]
+        exported_data['ew_returns'] = np.concatenate([[exported_data['ew_nav'][0] - 1.], exported_data['ew_nav'][1:] / exported_data['ew_nav'][:-1] - 1.])[:self.step_count]
+        exported_data['positions'] = self.positions[:self.step_count]
+        exported_data['costs'] = self.costs[:self.step_count]
+        exported_data['actions'] = self.actions[:self.step_count]
+        exported_data['rewards_history'] = self.rewards_history[:self.step_count]
 
         return deepcopy(exported_data)
 
@@ -267,23 +267,51 @@ class PortfolioEnv(gym.Env):
         render_data = self.sim.export()
         last_step = render_data['last_step']
         x_ = np.arange(last_step)
-        self.ax1.plot(x_, render_data['navs'][:last_step], color='k')
-        self.ax1.plot(x_, render_data['ew_nav'][:last_step], color='r')
+        self.ax1.plot(x_, render_data['navs'], color='k')
+        self.ax1.plot(x_, render_data['ew_nav'], color='r')
 
-        actions_t = np.transpose(render_data['actions'][:last_step])
+        actions_t = np.transpose(render_data['actions'])
         pal = sns.color_palette("hls", 19)
         self.ax2.stackplot(x_, actions_t, colors=pal)
 
-        asset_returns_df = render_data['asset_returns_df'][:last_step]
+        asset_returns_df = render_data['asset_returns_df']
         asset_list = asset_returns_df.columns
         asset_cum_returns_t = np.cumprod(1 + np.transpose(asset_returns_df.values), axis=1)
         for i in range(len(asset_list)):
             self.ax3.plot(x_, asset_cum_returns_t[i], color=pal[i])
 
-        self.ax4.plot(x_, render_data['rewards_history'][:last_step])
+        self.ax4.plot(x_, render_data['rewards_history'])
 
         if statistics:
-            pass
+            mean_return = np.mean(render_data['nav_returns']) * 250
+            std_return = np.std(render_data['nav_returns'], ddof=1) * np.sqrt(250)
+            cum_return = render_data['navs'][-1] - 1
+            total_cost = np.sum(render_data['costs'])
+
+            ew_mean_return = np.mean(render_data['ew_returns']) * 250
+            ew_std_return = np.std(render_data['ew_returns'], ddof=1) * np.sqrt(250)
+            ew_cum_return = render_data['ew_nav'][-1] - 1
+
+            max_nav = 1.
+            max_nav_i = 0
+            mdd_i = 0.
+            mdd = list()
+            for i in range(last_step):
+                if render_data['navs'][i] >= max_nav:
+                    max_nav = render_data['navs'][i]
+                    max_nav_i = i
+                else:
+                    mdd_i = np.min(render_data['navs'][max_nav_i:(i+1)]) / max_nav - 1.
+                mdd.append(mdd_i)
+            max_mdd = np.min(mdd)
+
+            print('model == ret:{} / std:{} / cum_return:{} / max_mdd:{} / cost:{}'.format(
+                mean_return, std_return, cum_return, max_mdd, total_cost))
+            print('ew_model == ret:{} / std:{} / cum_return:{}'.format(
+                ew_mean_return, ew_std_return, ew_cum_return))
+
+
+
 
 
 

@@ -260,7 +260,10 @@ class MetaPPO:
 
             batch_loss += loss.numpy() / batch_count
 
-            print('{} / {} == loss: {}'.format(i, batch_count, batch_loss))
+        print('loss: {} (last: loss_pi:{:.4f}/loss_v:{:.4f}/pol_entpen:{:.4f}/loss_sum:{:.4f}'.format(
+            batch_loss, loss_pi, loss_v, pol_entpen, loss_sum))
+        print('grad: {}'.format(grad[-1]))
+        print('log sigma: {}'.format(self.log_sigma))
 
         return grad
 
@@ -328,7 +331,7 @@ class Sampler:
     def __init__(self, env):
         self.env = env
 
-    def get_trajectories(self, model, begin_t=None, end_t=None, render=False):
+    def get_trajectories(self, model, begin_t=None, end_t=None, render=False, stochastic=True, statistics=False):
         buffer_s, buffer_a, buffer_v, buffer_r, buffer_done = [], [], [], [], []
         rolling_r = RunningStats()
 
@@ -338,14 +341,14 @@ class Sampler:
 
         batch_size = end_t - begin_t
         while len(buffer_r) < batch_size:
-            a, v = model.evaluate_state(s, stochastic=True)
+            a, v = model.evaluate_state(s, stochastic=stochastic)
 
             buffer_s.append(s)
             buffer_a.append(a)
             buffer_v.append(tf.squeeze(v))
             buffer_done.append(done)
 
-            a = tf.clip_by_value(a, self.env.action_space.low, self.env.action_space.high)
+            # a = tf.clip_by_value(a, self.env.action_space.low, self.env.action_space.high)
             s, r, _, done = self.env.step(np.squeeze(a))
             buffer_r.append(r)
             t_step += 1
@@ -374,7 +377,7 @@ class Sampler:
                                                np.vstack(buffer_a), np.vstack(returns), np.vstack(adv)
 
         if render:
-            self.env.render()
+            self.env.render(statistics)
 
         return s_batch, a_batch, r_batch, adv_batch
 
@@ -397,11 +400,11 @@ def main():
     model = MetaPPO(env, M=M, K=K)
 
     # time.sleep(1)
-    f_name = './{}2.pkl'.format(model_name)
+    f_name = './{}_singletest.pkl'.format(model_name)
     if os.path.exists(f_name):
         model.load_model(f_name)
 
-    n_envs = 8
+    n_envs = 1
     initial_t = 20      # 최초 랜덤선택을 위한 길이
     t_start = initial_t + M + K
 
@@ -411,25 +414,31 @@ def main():
     s = main_env.reset(t)
     for t_step, t in enumerate(range(t_start, T - test_length, test_length)):
         print("t: {}".format(t))
-        env_samples = np.random.choice(M + np.arange(initial_t + t_step * test_length), n_envs, replace=True)
+        # env_samples = np.random.choice(M + np.arange(initial_t + t_step * test_length), n_envs, replace=True)
+        env_samples = [268]
 
         # # train time
-        EP_MAX = 10
+        EP_MAX = 50
         for ep in range(EP_MAX + 1):
+            s_train = time.time()
             print("[TRAIN] t: {} / ep: {}".format(t, ep))
             model.metatrain(env_samples)
+            e_train = time.time()
+            print("[TRAIN] t: {} / ep: {} ({} sec per ep)".format(t, ep, e_train - s_train))
 
             if ep % 5 == 0:
                 print('model saved. ({})'.format(f_name))
                 model.save_model(f_name)
 
         # test time
-        test_buffer_r = []
+        model.sampler.get_trajectories(model, env_samples[0], env_samples[0] + K, render=True, stochastic=False, statistics=True)
 
-        for n in range(test_length):
+        test_buffer_r = []
+        s = main_env.reset(env_samples[0])
+        model.fast_train(env_samples[0])
+        for n in range(test_length+100):
             s_test = time.time()
-            print("[TEST] t: {} / n_day: {}".format(t, n))
-            model.fast_train(t + n)
+            print("[TEST] t: {} / n_day: {}".format(env_samples[0], n))
             a, v = model.evaluate_state(s, stochastic=False)
             s, r, _, done = main_env.step(np.squeeze(a))
 
@@ -438,5 +447,5 @@ def main():
             e_test = time.time()
             print("[TEST] t: {} / n_day: {} ({} sec)".format(t, n, e_test - s_test))
 
-        main_env.render()
+        main_env.render(statistics=True)
         data = main_env.sim.export()
