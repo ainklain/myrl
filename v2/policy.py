@@ -19,7 +19,7 @@ EP_MAX = 1000
 GAMMA = 0.99
 LAMBDA = 0.95
 ENTROPY_BETA = 0.01
-LR = 0.0001
+LR = 0.01
 META_LR = 0.001
 # BATCH = 8192
 BATCH = 512
@@ -179,8 +179,9 @@ class MetaPPO:
         self.global_step = 0
         self._initialize(env.reset())
 
-        self.optim_param_net_wgt = self.param_network.get_weights()
-        self.optim_log_sigma_wgt = self.log_sigma.numpy()
+        self.update_optim()
+        # self.optim_param_net_wgt = self.param_network.get_weights()
+        # self.optim_log_sigma_wgt = self.log_sigma.numpy()
 
     def _initialize(self, s):
         _ = self.param_network(s)
@@ -196,7 +197,24 @@ class MetaPPO:
             action = self.dist.sample({'mean': mu, 'log_std': self.log_sigma})
         else:
             action = mu
-        return self.action_to_weight_zero(action), value_
+        return self.action_to_weight_logic(action), value_
+        # return self.action_to_weight_zero(action), value_
+
+    def action_to_weight_logic(self, action):
+
+        """
+        order: a[mom, bm, gpa, kospi, cash]  => reverse: a[cash, kospi, gpa, bm, mom]
+        w_cash = a_cash
+        w_kospi = (1-a_cash) * a_kospi
+        w_gpa = (1-a_cash) * (1-a_kospi) * a_gpa
+        w_bm = (1-a_cash) * (1-a_kospi) * (1-a_gpa) * a_bm
+        w_mom = (1-a_cash) * (1-a_kospi) * (1-a_gpa) * (1-a_bm) * a_mom
+        => [w_cash, w_kospi, w_gpa, w_bm, w_mom] = a * [1, (1-a_cash), (1-a_cash)*(1-a_kospi), ...]
+        """
+        action = tf.clip_by_value(tf.squeeze(action), self.a_min, self.a_max)
+        a_temp = tf.math.cumprod(1 - action, reverse=True)
+        a_real = tf.concat([a_temp[1:], tf.constant([1.])], axis=0) * action
+        return a_real
 
     def action_to_weight_linear(self, action):
         a_positive = action - tf.math.reduce_min(action) + self.a_min
@@ -205,6 +223,10 @@ class MetaPPO:
     def action_to_weight_zero(self, action):
         a_positive = tf.clip_by_value(action, self.a_min, self.a_max)
         return a_positive / tf.reduce_sum(a_positive, axis=1, keepdims=True)
+
+    def action_to_nonnegative(self, action):
+        a_positive = tf.clip_by_value(action, self.a_min, self.a_max)
+        return a_positive
 
     def polynomial_epsilon_decay(self, learning_rate, global_step, decay_steps, end_learning_rate, power):
         global_step_ = min(global_step, decay_steps)
@@ -247,10 +269,13 @@ class MetaPPO:
                 entropy = self.dist.entropy({'mean': mu, 'log_std': self.log_sigma})
                 pol_entpen = -ENTROPY_BETA * tf.reduce_mean(entropy)
 
-                loss_sum = tf.reduce_mean(tf.maximum(tf.reduce_sum(a_mini, axis=1) - 1, 0) + tf.maximum(
-                    0.99 - tf.reduce_sum(a_mini, axis=1), 0)) * 100
+                # loss_sum = tf.reduce_mean(tf.maximum(tf.reduce_sum(a_mini, axis=1) - 1., 0.) + tf.maximum(
+                #     0.99 - tf.reduce_sum(a_mini, axis=1), 0.)) * 10000
+                #
+                # loss_const = tf.reduce_mean(tf.reduce_sum(tf.maximum(a_mini - 1., 0.), axis=1) + tf.reduce_sum(
+                #     tf.maximum(- a_mini, 0.), axis=1)) * 10000
 
-                loss = loss_pi + loss_v * VF_COEFF + pol_entpen + loss_sum
+                loss = loss_pi + loss_v * VF_COEFF + pol_entpen # + loss_sum + loss_const
 
             minigrad = tape.gradient(loss, self.param_network.trainable_variables + [self.log_sigma])
             if i == 0:
@@ -260,21 +285,23 @@ class MetaPPO:
 
             batch_loss += loss.numpy() / batch_count
 
-        print('loss: {} (last: loss_pi:{:.4f}/loss_v:{:.4f}/pol_entpen:{:.4f}/loss_sum:{:.4f}'.format(
-            batch_loss, loss_pi, loss_v, pol_entpen, loss_sum))
+        print('loss: {} (last: loss_pi:{:.4f}/loss_v:{:.4f}/pol_entpen:{:.4f}'.format(
+            batch_loss, loss_pi, loss_v, pol_entpen))
+        # print('loss: {} (last: loss_pi:{:.4f}/loss_v:{:.4f}/pol_entpen:{:.4f}/loss_sum:{:.4f}/loss_const:{:.4f}'.format(
+        #     batch_loss, loss_pi, loss_v, pol_entpen, loss_sum, loss_const))
         print('grad: {}'.format(grad[-1]))
         print('log sigma: {}'.format(self.log_sigma))
 
         return grad
 
-    def metatrain(self, env_samples):
+    def metatrain(self, env_samples, n_fast_train=1, n_tr_samples=5):
         self.assign_old_network()
 
         meta_grad = None
 
         for env_i, env_t in enumerate(env_samples):
-            self.fast_train(env_t)
-            trajectory_target = self.sampler.get_trajectories(self, env_t, env_t + self.K)
+            self.fast_train(env_t, n_fast_train, n_tr_samples)
+            trajectory_target = self.sampler.get_tr_batch(n_tr_samples, self, env_t, env_t + self.K)
 
             self.param_network.set_weights(self.optim_param_net_wgt)
             self.log_sigma.assign(self.optim_log_sigma_wgt)
@@ -291,13 +318,20 @@ class MetaPPO:
         self.optim_param_net_wgt = self.param_network.get_weights()
         self.optim_log_sigma_wgt = self.log_sigma.numpy()
 
-    def fast_train(self, env_t):
+        a_sample, _ = self.evaluate_state(self.sampler.env.reset(env_t))
+        print("sample action: {} (sum: {})".format(a_sample, np.sum(a_sample)))
+
+    def fast_train(self, env_t, n_train=1, n_tr_samples=5):
         self.param_network.set_weights(self.optim_param_net_wgt)
         self.log_sigma.assign(self.optim_log_sigma_wgt)
+        trajectory_sample = self.sampler.get_tr_batch(n_tr_samples, self, env_t - self.M, env_t, render=False)
+        for n in range(n_train):
+            grad = self.grad_loss(trajectory_sample)
+            self.optimizer.apply_gradients(zip(grad, self.param_network.trainable_variables + [self.log_sigma]))
 
-        trajectory_sample = self.sampler.get_trajectories(self, env_t - self.M, env_t, render=False)
-        grad = self.grad_loss(trajectory_sample)
-        self.optimizer.apply_gradients(zip(grad, self.param_network.trainable_variables + [self.log_sigma]))
+    def update_optim(self):
+        self.optim_param_net_wgt = self.param_network.get_weights()
+        self.optim_log_sigma_wgt = self.log_sigma.numpy()
 
     def save_model(self, f_name):
         w_dict = {}
@@ -331,6 +365,19 @@ class Sampler:
     def __init__(self, env):
         self.env = env
 
+    def get_tr_batch(self, n_trajectories, *args, **kwargs):
+        for i in range(n_trajectories):
+            if i == 0:
+                s_batch, a_batch, r_batch, adv_batch = self.get_trajectories(*args, **kwargs)
+            else:
+                s_tr, a_tr, r_tr, adv_tr = self.get_trajectories(*args, **kwargs)
+                s_batch = np.concatenate([s_batch, s_tr], axis=0)
+                a_batch = np.concatenate([a_batch, a_tr], axis=0)
+                r_batch = np.concatenate([r_batch, r_tr], axis=0)
+                adv_batch = np.concatenate([adv_batch, adv_tr], axis=0)
+
+        return s_batch, a_batch, r_batch, adv_batch
+
     def get_trajectories(self, model, begin_t=None, end_t=None, render=False, stochastic=True, statistics=False):
         buffer_s, buffer_a, buffer_v, buffer_r, buffer_done = [], [], [], [], []
         rolling_r = RunningStats()
@@ -339,8 +386,8 @@ class Sampler:
         done = False
         t_step = 0
 
-        batch_size = end_t - begin_t
-        while len(buffer_r) < batch_size:
+        tr_length = end_t - begin_t
+        while len(buffer_r) < tr_length:
             a, v = model.evaluate_state(s, stochastic=stochastic)
 
             buffer_s.append(s)
@@ -348,8 +395,8 @@ class Sampler:
             buffer_v.append(tf.squeeze(v))
             buffer_done.append(done)
 
-            # a = tf.clip_by_value(a, self.env.action_space.low, self.env.action_space.high)
-            s, r, _, done = self.env.step(np.squeeze(a))
+            s, r, _, done = self.env.step(a)
+
             buffer_r.append(r)
             t_step += 1
 
@@ -373,7 +420,7 @@ class Sampler:
         returns = adv + np.array(buffer_v)
         adv = (adv - adv.mean()) / np.maximum(adv.std(), 1e-6)
 
-        s_batch, a_batch, r_batch, adv_batch = np.reshape(buffer_s, (batch_size,) + model.s_dim), \
+        s_batch, a_batch, r_batch, adv_batch = np.reshape(buffer_s, (tr_length,) + model.s_dim), \
                                                np.vstack(buffer_a), np.vstack(returns), np.vstack(adv)
 
         if render:
@@ -381,9 +428,14 @@ class Sampler:
 
         return s_batch, a_batch, r_batch, adv_batch
 
+# meta_ppo_model_shared_invest_singletest  : 268, 300 test (action_to_weight_zero, n_train=1)
+# meta_ppo_model_shared_invest_singletest_n : 268, 300 test (action only and loss, n_train=n)
+# meta_ppo_shared_invest_singletest_n : 268 test (only fast_train (n=100))
 
 def main():
-    model_name = 'meta_ppo_model_shared_invest'
+    # model_name = 'meta_ppo_shared_invest_singletest_n'
+    model_name = 'ppo_shared_invest_singletest_n'
+    f_name = './{}.pkl'.format(model_name)
     ENVIRONMENT = 'PortfolioEnv'
 
     if ENVIRONMENT == 'PortfolioEnv':
@@ -394,15 +446,14 @@ def main():
     SUMMARY_DIR = os.path.join('./', 'PPO', ENVIRONMENT, TIMESTAMP)
 
     # BATCH = 128
-    M = 256     # support set 길이
-    K = 128     # target set 길이
+    M = 64     # support set 길이
+    K = 32     # target set 길이
     test_length = 20
     model = MetaPPO(env, M=M, K=K)
 
     # time.sleep(1)
-    f_name = './{}_singletest.pkl'.format(model_name)
-    if os.path.exists(f_name):
-        model.load_model(f_name)
+    # if os.path.exists(f_name):
+    #     model.load_model(f_name)
 
     n_envs = 1
     initial_t = 20      # 최초 랜덤선택을 위한 길이
@@ -412,40 +463,43 @@ def main():
     t = t_start
     t_step = 0
     s = main_env.reset(t)
-    for t_step, t in enumerate(range(t_start, T - test_length, test_length)):
+    # for t_step, t in enumerate(range(t_start, T - test_length, test_length)):
+    for t_step, t in enumerate(range(t_start, t_start + 1)):
         print("t: {}".format(t))
         # env_samples = np.random.choice(M + np.arange(initial_t + t_step * test_length), n_envs, replace=True)
         env_samples = [268]
 
         # # train time
-        EP_MAX = 50
-        for ep in range(EP_MAX + 1):
-            s_train = time.time()
-            print("[TRAIN] t: {} / ep: {}".format(t, ep))
-            model.metatrain(env_samples)
-            e_train = time.time()
-            print("[TRAIN] t: {} / ep: {} ({} sec per ep)".format(t, ep, e_train - s_train))
-
-            if ep % 5 == 0:
-                print('model saved. ({})'.format(f_name))
-                model.save_model(f_name)
+        # EP_MAX = 50
+        # for ep in range(EP_MAX + 1):
+        #     s_train = time.time()
+        #     print("[TRAIN] t: {} / ep: {}".format(t, ep))
+        #     model.metatrain(env_samples)
+        #     e_train = time.time()
+        #     print("[TRAIN] t: {} / ep: {} ({} sec per ep)".format(t, ep, e_train - s_train))
+        #     if ep % 5 == 0:
+        #         print('model saved. ({})'.format(f_name))
+        #         model.save_model(f_name)
 
         # test time
-        model.sampler.get_trajectories(model, env_samples[0], env_samples[0] + K, render=True, stochastic=False, statistics=True)
-
         test_buffer_r = []
-        s = main_env.reset(env_samples[0])
-        model.fast_train(env_samples[0])
-        for n in range(test_length+100):
-            s_test = time.time()
-            print("[TEST] t: {} / n_day: {}".format(env_samples[0], n))
-            a, v = model.evaluate_state(s, stochastic=False)
-            s, r, _, done = main_env.step(np.squeeze(a))
+        for _ in range(20):
+            for _ in range(10):
+                model.fast_train(env_samples[0], n_train=10, n_tr_samples=5)
+                model.update_optim()
 
-            test_buffer_r.append(r)
+            s = main_env.reset(env_samples[0]-M)
+            for n in range(M + K):
+                s_test = time.time()
+                print("[TEST] t: {} / n_day: {}".format(env_samples[0], n))
+                a, v = model.evaluate_state(s, stochastic=False)
+                s, r, _, done = main_env.step(np.squeeze(a))
 
-            e_test = time.time()
-            print("[TEST] t: {} / n_day: {} ({} sec)".format(t, n, e_test - s_test))
+                test_buffer_r.append(r)
 
-        main_env.render(statistics=True)
+                e_test = time.time()
+                print("[TEST] t: {} / n_day: {} ({} sec)".format(t, n, e_test - s_test))
+
+            main_env.render(statistics=True)
+
         data = main_env.sim.export()

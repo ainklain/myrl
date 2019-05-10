@@ -114,6 +114,7 @@ class PortfolioSim(object):
             done = False
             winning_reward = 0
 
+
         # total_reward = 0.1 * instant_reward + 0.9 * winning_reward
         total_reward = instant_reward + winning_reward
         self.rewards_history[self.step_count] = total_reward
@@ -149,7 +150,7 @@ class PortfolioEnv(gym.Env):
     def __init__(self,
                  trading_cost=0.0020,
                  input_window_length=250,
-                 max_path_length=250,
+                 max_path_length=512,
                  is_training=True,
                  cash_asset=True):
         super().__init__()
@@ -206,7 +207,7 @@ class PortfolioEnv(gym.Env):
         if self.cash_asset:
             y1[-1] = 0
 
-        reward, info, done2 = self.sim._step(action.squeeze(), y1, np.array(obs.iloc[-1][self.macro_list]))
+        reward, info, done2 = self.sim._step(action, y1, np.array(obs.iloc[-1][self.macro_list]))
 
         if debugging:
             print("{} reward: {} // y1: {} // info: {} // done: {}".format(
@@ -247,7 +248,6 @@ class PortfolioEnv(gym.Env):
                 self.fig = plt.figure()
                 self.ax1, self.ax2, self.ax3, self.ax4 = self.fig.subplots(4, 1)
                 self.render_call += 1
-
 
             self._get_image(statistics)
 
