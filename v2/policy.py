@@ -211,9 +211,11 @@ class MetaPPO:
         w_mom = (1-a_cash) * (1-a_kospi) * (1-a_gpa) * (1-a_bm) * a_mom
         => [w_cash, w_kospi, w_gpa, w_bm, w_mom] = a * [1, (1-a_cash), (1-a_cash)*(1-a_kospi), ...]
         """
-        action = tf.clip_by_value(tf.squeeze(action), self.a_min, self.a_max)
-        a_temp = tf.math.cumprod(1 - action, reverse=True)
-        a_real = tf.concat([a_temp[1:], tf.constant([1.])], axis=0) * action
+        action_clip = tf.clip_by_value(tf.squeeze(action), self.a_min, self.a_max)
+        a_temp = tf.math.cumprod(1 - action_clip, reverse=True)
+        a_real = tf.concat([a_temp[1:], tf.constant([1.])], axis=0) * action_clip
+        if np.sum(a_real.numpy()) < 0.98  or np.sum(a_real.numpy()) > 1.02:
+            print("action:{}\naction_clip:{}\na_temp:{}\na_real:{}".format(action, action_clip, a_temp, a_real))
         return a_real
 
     def action_to_weight_linear(self, action):
@@ -492,8 +494,8 @@ def main():
             for n in range(M + K):
                 s_test = time.time()
                 print("[TEST] t: {} / n_day: {}".format(env_samples[0], n))
-                a, v = model.evaluate_state(s, stochastic=False)
-                s, r, _, done = main_env.step(np.squeeze(a))
+                a, v = model.evaluate_state(s, stochastic=True)
+                s, r, _, done = main_env.step(a)
 
                 test_buffer_r.append(r)
 
