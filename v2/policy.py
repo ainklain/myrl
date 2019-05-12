@@ -19,7 +19,7 @@ EP_MAX = 1000
 GAMMA = 0.99
 LAMBDA = 0.95
 ENTROPY_BETA = 0.01
-LR = 0.01
+LR = 0.001
 META_LR = 0.001
 # BATCH = 8192
 BATCH = 512
@@ -213,9 +213,10 @@ class MetaPPO:
         """
         action_clip = tf.clip_by_value(tf.squeeze(action), self.a_min, self.a_max)
         a_temp = tf.math.cumprod(1 - action_clip, reverse=True)
-        a_real = tf.concat([a_temp[1:], tf.constant([1.])], axis=0) * action_clip
-        if np.sum(a_real.numpy()) < 0.98  or np.sum(a_real.numpy()) > 1.02:
-            print("action:{}\naction_clip:{}\na_temp:{}\na_real:{}".format(action, action_clip, a_temp, a_real))
+        a_real = tf.concat([a_temp[1:], tf.constant([1.])], axis=0) * tf.concat([tf.constant([1.]), action_clip[1:]], axis=0)
+        if np.sum(a_real.numpy()) < 0.98 or np.sum(a_real.numpy()) > 1.02:
+            print("action:{}\naction_clip:{}\na_temp:{}\na_real:{}, sum:{}".format(
+                action, action_clip, a_temp, a_real, np.sum(a_real)))
         return a_real
 
     def action_to_weight_linear(self, action):
@@ -291,8 +292,8 @@ class MetaPPO:
             batch_loss, loss_pi, loss_v, pol_entpen))
         # print('loss: {} (last: loss_pi:{:.4f}/loss_v:{:.4f}/pol_entpen:{:.4f}/loss_sum:{:.4f}/loss_const:{:.4f}'.format(
         #     batch_loss, loss_pi, loss_v, pol_entpen, loss_sum, loss_const))
-        print('grad: {}'.format(grad[-1]))
-        print('log sigma: {}'.format(self.log_sigma))
+        # print('grad: {}'.format(grad[-1]))
+        # print('log sigma: {}'.format(self.log_sigma))
 
         return grad
 
@@ -433,10 +434,10 @@ class Sampler:
 # meta_ppo_model_shared_invest_singletest  : 268, 300 test (action_to_weight_zero, n_train=1)
 # meta_ppo_model_shared_invest_singletest_n : 268, 300 test (action only and loss, n_train=n)
 # meta_ppo_shared_invest_singletest_n : 268 test (only fast_train (n=100))
-
+# meta_ppo_shared_invest_n  : random (** learned)
 def main():
     # model_name = 'meta_ppo_shared_invest_singletest_n'
-    model_name = 'ppo_shared_invest_singletest_n'
+    model_name = 'meta_ppo_shared_invest_n_newenv'
     f_name = './{}.pkl'.format(model_name)
     ENVIRONMENT = 'PortfolioEnv'
 
@@ -448,16 +449,16 @@ def main():
     SUMMARY_DIR = os.path.join('./', 'PPO', ENVIRONMENT, TIMESTAMP)
 
     # BATCH = 128
-    M = 64     # support set 길이
-    K = 32     # target set 길이
+    M = 128     # support set 길이
+    K = 64     # target set 길이
     test_length = 20
     model = MetaPPO(env, M=M, K=K)
 
     # time.sleep(1)
-    # if os.path.exists(f_name):
-    #     model.load_model(f_name)
+    if os.path.exists(f_name):
+        model.load_model(f_name)
 
-    n_envs = 1
+    n_envs = 8
     initial_t = 20      # 최초 랜덤선택을 위한 길이
     t_start = initial_t + M + K
 
@@ -465,43 +466,73 @@ def main():
     t = t_start
     t_step = 0
     s = main_env.reset(t)
-    # for t_step, t in enumerate(range(t_start, T - test_length, test_length)):
-    for t_step, t in enumerate(range(t_start, t_start + 1)):
+    for t_step, t in enumerate(range(t_start, T - test_length, test_length)):
+    # for t_step, t in enumerate(range(t_start, t_start + 1)):
         print("t: {}".format(t))
-        # env_samples = np.random.choice(M + np.arange(initial_t + t_step * test_length), n_envs, replace=True)
-        env_samples = [268]
+        env_samples = np.random.choice(M + np.arange(initial_t + t_step * test_length), n_envs, replace=True)
+        # env_samples = [268, 300]
 
-        # # train time
-        # EP_MAX = 50
-        # for ep in range(EP_MAX + 1):
-        #     s_train = time.time()
-        #     print("[TRAIN] t: {} / ep: {}".format(t, ep))
-        #     model.metatrain(env_samples)
-        #     e_train = time.time()
-        #     print("[TRAIN] t: {} / ep: {} ({} sec per ep)".format(t, ep, e_train - s_train))
-        #     if ep % 5 == 0:
-        #         print('model saved. ({})'.format(f_name))
-        #         model.save_model(f_name)
+        # train time
+        EP_MAX = 200
+        for ep in range(EP_MAX + 1):
+            s_train = time.time()
+            print("[TRAIN] t: {} / ep: {}".format(t, ep))
+            model.metatrain(env_samples,  n_fast_train=1, n_tr_samples=5)
+            e_train = time.time()
+            print("[TRAIN] t: {} / ep: {} ({} sec per ep)".format(t, ep, e_train - s_train))
+            if ep % 5 == 0:
+                print('model saved. ({})'.format(f_name))
+                model.save_model(f_name)
+
+            if ep % 20 == 0:
+                s_temp = env.reset(env_samples[0])
+                model.fast_train(env_samples[0], n_train=1, n_tr_samples=5)
+                for n in range(K):
+                    s_test = time.time()
+                    print("[TRAIN] t: {} / n_day: {}".format(env_samples[0], n))
+                    a_temp, v_temp = model.evaluate_state(s_temp, stochastic=True)
+                    s_temp, r_temp, _, done_temp = main_env.step(a_temp)
+
+                    e_test = time.time()
+                    print("[TRAIN] t: {} / n_day: {} ({} sec)".format(env_samples[0], n, e_test - s_test))
+
+                env.render(statistics=True)
 
         # test time
         test_buffer_r = []
-        for _ in range(20):
-            for _ in range(10):
-                model.fast_train(env_samples[0], n_train=10, n_tr_samples=5)
-                model.update_optim()
 
-            s = main_env.reset(env_samples[0]-M)
-            for n in range(M + K):
-                s_test = time.time()
-                print("[TEST] t: {} / n_day: {}".format(env_samples[0], n))
-                a, v = model.evaluate_state(s, stochastic=True)
-                s, r, _, done = main_env.step(a)
+        model.fast_train(t, n_train=1, n_tr_samples=5)
+        for n in range(K):
+            s_test = time.time()
+            print("[TEST] t: {} / n_day: {}".format(t, n))
+            a, v = model.evaluate_state(s, stochastic=False)
+            s, r, _, done = main_env.step(a)
 
-                test_buffer_r.append(r)
+            test_buffer_r.append(r)
 
-                e_test = time.time()
-                print("[TEST] t: {} / n_day: {} ({} sec)".format(t, n, e_test - s_test))
+            e_test = time.time()
+            print("[TEST] t: {} / n_day: {} ({} sec)".format(t, n, e_test - s_test))
 
-            main_env.render(statistics=True)
+        main_env.render(statistics=True)
+
+    # env_i = 0
+        # for _ in range(20):
+        #     for _ in range(5):
+        #         model.fast_train(env_samples[env_i], n_train=10, n_tr_samples=5)
+        #         # model.update_optim()
+        #
+        #     s = main_env.reset(env_samples[env_i]-M)
+        #     for n in range(M + K):
+        #         s_test = time.time()
+        #         print("[TEST] t: {} / n_day: {}".format(env_samples[env_i], n))
+        #         a, v = model.evaluate_state(s, stochastic=False)
+        #         s, r, _, done = main_env.step(a)
+        #
+        #         test_buffer_r.append(r)
+        #
+        #         e_test = time.time()
+        #         print("[TEST] t: {} / n_day: {} ({} sec)".format(t, n, e_test - s_test))
+        #
+        #     main_env.render(statistics=True)
 
         data = main_env.sim.export()

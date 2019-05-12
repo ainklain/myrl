@@ -25,8 +25,9 @@ class PortfolioSim(object):
     def __init__(self,
                  asset_list,
                  macro_list=None,
-                 max_path_length=512,
                  trading_cost=1e-3):
+
+        self.asset_list = asset_list
         self.trading_cost = trading_cost
         self.max_path_length = max_path_length
         self.step_count = 0
@@ -36,23 +37,16 @@ class PortfolioSim(object):
         if macro_list is not None:
             self.macros_return_df = pd.DataFrame(columns=macro_list)
 
-        self.actions = np.zeros([max_path_length, len(asset_list)])
-        self.navs = np.ones(max_path_length)
-        self.assets_nav = np.ones([max_path_length, len(asset_list)])
-        self.positions = np.zeros([max_path_length, len(asset_list)])
-        self.costs = np.zeros(max_path_length)
-        self.trades = np.zeros([max_path_length, len(asset_list)])
-        self.rewards_history = np.ones(max_path_length)
-
-    def reset(self):
+    def reset(self, n_envs, max_path_length=512):
         self.step_count = 0
-        self.actions.fill(0)
-        self.navs.fill(1)
-        self.assets_nav.fill(1)
-        self.rewards_history.fill(0)
-        self.positions.fill(0)
-        self.costs.fill(0)
-        self.trades.fill(0)
+        self.max_path_length = max_path_length
+        self.navs = np.ones([n_envs, max_path_length])
+        self.assets_nav = np.ones([n_envs, len(self.asset_list), max_path_length, ])
+        self.rewards_history = np.ones(max_path_length)
+        self.costs = np.zeros(max_path_length)
+
+        self.last_pos = np.zeros([n_envs, len(self.asset_list)])
+        self.dones = np.array([False for _ in range(n_envs)])
 
         self.assets_return_df = self.assets_return_df.iloc[0:0]
         if self.macros_return_df is not None:
@@ -60,87 +54,60 @@ class PortfolioSim(object):
 
     def _step(self, actions, assets_return, macros_return=None):
         eps = 1e-8
-
-        if self.step_count == 0:
-            last_pos = np.zeros(len(actions))
-            last_nav = 1.
-            last_asset_nav = np.ones(len(actions))
-        else:
-            last_pos = self.positions[self.step_count - 1, :]
-            last_nav = self.navs[self.step_count - 1]
-            last_asset_nav = self.assets_nav[self.step_count - 1, :]
-
-        self.assets_return_df.loc[self.step_count] = assets_return
+        self.assets_return_df.loc[self.step_count] = np.squeeze(assets_return)
         if macros_return is not None:
             self.macros_return_df.loc[self.step_count] = macros_return
 
-        self.actions[self.step_count, :] = actions
+        positions = ((assets_return + 1.) * actions) / (np.sum((assets_return + 1.) * actions, axis=1, keepdims=True) + eps)
+        trades = actions - self.last_pos
+        self.last_pos = positions
 
-        self.positions[self.step_count, :] = ((assets_return + 1.) * actions) / (np.dot((assets_return + 1.), actions) + eps)
-        self.trades[self.step_count, :] = actions - last_pos
-
-        trade_costs_pct = np.sum(abs(self.trades[self.step_count, :])) * self.trading_cost
-        self.costs[self.step_count] = trade_costs_pct
-        instant_reward = (np.dot((assets_return + 1.), actions) - 1.) - self.costs[self.step_count]
+        trade_costs_pct = np.sum(abs(trades), axis=1, keepdims=True) * self.trading_cost
+        costs = trade_costs_pct
+        instant_reward = (np.sum((assets_return + 1.) * actions, axis=1, keepdims=True) - 1.) - costs
 
         # if self.step_count != 0:
-        self.navs[self.step_count] = last_nav * (1. + instant_reward)
-        self.assets_nav[self.step_count, :] = last_asset_nav * (1. + assets_return)
-
-        if self.step_count == (self.max_path_length - 1):         # 최대 기간 도달
-            done = True
-            if self.navs[self.step_count] >= (1 + 0.05 * (self.step_count / 250)):      # 1년 5 % 이상 (목표)
-                winning_reward = 100 * (1 + 0.05 * (self.step_count / 250))
-            else:
-                winning_reward = -1
-        elif self.navs[self.step_count] >= (1 + 0.07 * (self.step_count / 250)):
-            done = False
-            winning_reward = (self.navs[self.step_count] - (1 + 0.07 * (self.step_count / 250))) * 5
-        elif self.navs[self.step_count] >= (1 + 0.05 * (self.step_count / 250)):
-            done = False
-            winning_reward = (self.navs[self.step_count] - (1 + 0.05 * (self.step_count / 250))) * 2
-        elif (self.navs[self.step_count] < np.max(self.navs) * 0.5):        # MDD -50% 초과시
-            done = True
-            winning_reward = -1
-        elif (self.navs[self.step_count] < np.max(self.navs) * 0.8):        # MDD -10% 초과시 패널티
-            done = False
-            winning_reward = (self.navs[self.step_count] / (np.max(self.navs) * 0.8) - 1.) * 10.
-        elif (self.navs[self.step_count] < np.max(self.navs) * 0.9):        # MDD -10% 초과시 패널티
-            done = False
-            winning_reward = self.navs[self.step_count] / (np.max(self.navs) * 0.9) - 1.
-        elif (self.navs[self.step_count] < np.max(self.navs) * 0.95):        # MDD -10% 초과시 패널티
-            done = False
-            winning_reward = (self.navs[self.step_count] / (np.max(self.navs) * 0.95) - 1.) * 0.3
+        if self.step_count == 0:
+            last_nav = np.ones([len(actions), 1])
+            last_asset_nav = np.ones_like(actions)
         else:
-            done = False
-            winning_reward = 0
+            last_nav = self.navs[:, self.step_count - 1]
+            last_asset_nav = self.assets_nav[:, :, self.step_count - 1]
+        self.navs[:, self.step_count:(self.step_count+1)] = last_nav * (1. + instant_reward)
+        self.assets_nav[:, :, self.step_count] = last_asset_nav * (1. + assets_return)
 
-        # if self.step_count == (self.max_path_length - 1):         # 최대 기간 도달
-        #     done = True
-        #     if self.navs[self.step_count] >= (1 + 0.05 * (self.step_count / 250)):      # 1년 5 % 이상 (목표)
-        #         winning_reward = 100 * (1 + 0.05 * (self.step_count / 250))
-        #     else:
-        #         winning_reward = -1
-        # elif (self.navs[self.step_count] < np.max(self.navs) * 0.5):        # MDD -50% 초과시
-        #     done = True
-        #     winning_reward = -1
-        # elif (self.navs[self.step_count] < np.max(self.navs) * 0.9):        # MDD -10% 초과시 패널티
-        #     done = False
-        #     winning_reward = self.navs[self.step_count] / np.max(self.navs) * 0.9 - 1.
-        # elif (self.step_count + 1) % 20 == 0:            # 월별 목표 달성시 reward/ 손실 발생시 penalty
-        #     done = False
-        #     if self.navs[self.step_count] >= (1 + 0.05 * (self.step_count / 250)):
-        #         winning_reward = (self.navs[self.step_count] / (1 + 0.05 * (self.step_count / 250)) - 1.) * 10
-        #     elif self.navs[self.step_count] >= 1:
-        #         winning_reward = 0
-        #     else:
-        #         winning_reward = (self.navs[self.step_count] - 1.) * 10
-        # else:
-        #     done = False
-        #     winning_reward = 0
+        winning_reward = np.zeros([len(actions), 1])
+        for env_i in range(len(actions)):
+            if self.dones[env_i]:
+                continue
+            if self.step_count == (self.max_path_length - 1):         # 최대 기간 도달
+                self.dones[env_i] = True
+                if self.navs[env_i, self.step_count] >= (1 + 0.05 * (self.step_count / 250)):      # 1년 5 % 이상 (목표)
+                    winning_reward[env_i] = 100 * (1 + 0.05 * (self.step_count / 250))
+                else:
+                    winning_reward[env_i] = -1
+            elif self.navs[env_i, self.step_count] >= (1 + 0.07 * (self.step_count / 250)):
+                self.dones[env_i] = False
+                winning_reward[env_i] = (self.navs[env_i, self.step_count] - (1 + 0.07 * (self.step_count / 250))) * 5
+            elif self.navs[env_i, self.step_count] >= (1 + 0.05 * (self.step_count / 250)):
+                self.dones[env_i] = False
+                winning_reward[env_i] = (self.navs[env_i, self.step_count] - (1 + 0.05 * (self.step_count / 250))) * 2
+            elif (self.navs[env_i, self.step_count] < np.max(self.navs[env_i, :]) * 0.5):        # MDD -50% 초과시
+                self.dones[env_i] = True
+                winning_reward[env_i] = -1
+            elif (self.navs[env_i, self.step_count] < np.max(self.navs[env_i, :]) * 0.8):        # MDD -10% 초과시 패널티
+                self.dones[env_i] = False
+                winning_reward[env_i] = (self.navs[env_i, self.step_count] / (np.max(self.navs[env_i, :]) * 0.8) - 1.) * 10.
+            elif (self.navs[self.step_count] < np.max(self.navs[env_i, :]) * 0.9):        # MDD -10% 초과시 패널티
+                self.dones[env_i] = False
+                winning_reward[env_i] = self.navs[env_i, self.step_count] / (np.max(self.navs[env_i, :]) * 0.9) - 1.
+            elif (self.navs[self.step_count] < np.max(self.navs[env_i, :]) * 0.95):        # MDD -10% 초과시 패널티
+                self.dones[env_i] = False
+                winning_reward[env_i] = (self.navs[env_i, self.step_count] / (np.max(self.navs[env_i, :]) * 0.95) - 1.) * 0.3
+            else:
+                self.dones[env_i] = False
+                winning_reward[env_i] = 0
 
-
-        # total_reward = 0.1 * instant_reward + 0.9 * winning_reward
         total_reward = instant_reward + winning_reward
         self.rewards_history[self.step_count] = total_reward
 
@@ -150,20 +117,19 @@ class PortfolioSim(object):
                 'costs': deepcopy(self.costs[self.step_count])}
 
         self.step_count += 1
-        return total_reward, info, done
+        return total_reward, info, self.done
 
     def export(self):
         exported_data = dict()
         exported_data['last_step'] = self.step_count
         exported_data['asset_returns_df'] = self.assets_return_df[:self.step_count]
         exported_data['macro_returns_df'] = self.macros_return_df[:self.step_count]
-        exported_data['navs'] = self.navs[:self.step_count]
-        exported_data['nav_returns'] = np.concatenate([[self.navs[0] - 1.], self.navs[1:] / self.navs[:-1] - 1.])[:self.step_count]
+        exported_data['navs'] = self.navs[:, self.step_count]
+        exported_data['nav_returns'] = np.concatenate([[self.navs[:, 0] - 1.],
+                                                       self.navs[:, 1:] / self.navs[:, -1] - 1.])[:self.step_count]
         exported_data['ew_nav'] = (1 + self.assets_return_df).cumprod(axis=0).mean(axis=1).values[:self.step_count]
         exported_data['ew_returns'] = np.concatenate([[exported_data['ew_nav'][0] - 1.], exported_data['ew_nav'][1:] / exported_data['ew_nav'][:-1] - 1.])[:self.step_count]
-        exported_data['positions'] = self.positions[:self.step_count]
         exported_data['costs'] = self.costs[:self.step_count]
-        exported_data['actions'] = self.actions[:self.step_count]
         exported_data['rewards_history'] = self.rewards_history[:self.step_count]
 
         return deepcopy(exported_data)
@@ -218,6 +184,7 @@ class PortfolioEnv(gym.Env):
         self._data = pd.concat([asset_df, macro_df], axis=1)
 
     def step(self, action, preprocess=True, debugging=False):
+        assert len(action.shape) == 2, "action : [n_batch, action_dim], len of shape should be 2"
         return self._step(action, debugging=debugging)
 
     def _step(self, action, debugging=False):
@@ -229,9 +196,11 @@ class PortfolioEnv(gym.Env):
                      axis=-1)
 
         y1 = np.array(obs.iloc[-1][self.asset_list])
+
         if self.cash_asset:
             y1[-1] = 0
 
+        y1 = y1.reshape([1, -1])
         reward, info, done2 = self.sim._step(action, y1, np.array(obs.iloc[-1][self.macro_list]))
 
         if debugging:
@@ -245,12 +214,12 @@ class PortfolioEnv(gym.Env):
 
         return s, reward, info, done
 
-    def reset(self, t0=0):
-        return self._reset(t0)
+    def reset(self, t0=0, n_envs=1):
+        return self._reset(t0, n_envs=n_envs)
 
-    def _reset(self, t0=0):
+    def _reset(self, t0=0, n_envs=1):
         self.i_step = self.input_window_length + t0
-        self.sim.reset()
+        self.sim.reset(n_envs)
         obs = self._data.iloc[(self.i_step - self.input_window_length):self.i_step]
         s = np.stack((obs.values,
                       self.preprocess(obs).values,
