@@ -7,7 +7,6 @@ from copy import deepcopy
 import seaborn as sns
 
 
-
 def factor_history_csv():
     file_nm = 'data_for_metarl.csv'
     df = pd.read_csv(file_nm, index_col=0)
@@ -29,7 +28,6 @@ class PortfolioSim(object):
 
         self.asset_list = asset_list
         self.trading_cost = trading_cost
-        self.max_path_length = max_path_length
         self.step_count = 0
 
         self.assets_return_df = pd.DataFrame(columns=asset_list)
@@ -227,7 +225,10 @@ class PortfolioEnv(gym.Env):
                      axis=-1)
         self.i_step += 1
 
-        self.render_call = 0
+        if n_envs > 1:
+            self.render_call = -1
+        else:
+            self.render_call = 0
 
         return s
 
@@ -236,6 +237,10 @@ class PortfolioEnv(gym.Env):
 
     def _render(self, mode='human', close=False, statistics=False):
         if mode == 'human':
+            if self.render_call == -1:
+                print("n_envs > 1. no rendering")
+                return None
+
             if self.render_call == 0:
                 # if hasattr(self, 'fig'):
                 #     plt.close(self.fig)
@@ -244,7 +249,6 @@ class PortfolioEnv(gym.Env):
                 self.render_call += 1
 
             self._get_image(statistics)
-
 
             if self.render_call == 0:
                 self.ax3.legend(loc='lower center', bbox_to_anchor=(0.5, -0.05), ncol=3, fancybox=True, shadow=True)

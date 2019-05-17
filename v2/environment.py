@@ -92,7 +92,7 @@ class PortfolioSim(object):
             if self.navs[self.step_count] >= (1 + 0.05 * (self.step_count / 250)):      # 1년 5 % 이상 (목표)
                 winning_reward = 100 * (1 + 0.05 * (self.step_count / 250))
             else:
-                winning_reward = -1
+                winning_reward = -10
         elif self.navs[self.step_count] >= (1 + 0.07 * (self.step_count / 250)):
             done = False
             winning_reward = (self.navs[self.step_count] - (1 + 0.07 * (self.step_count / 250))) * 5
@@ -262,10 +262,10 @@ class PortfolioEnv(gym.Env):
 
         return s
 
-    def render(self, mode='human', close=False, statistics=False):
-        return self._render(mode=mode,  close=close, statistics=statistics)
+    def render(self, mode='human', close=False, statistics=False, save_filename=None):
+        return self._render(mode=mode,  close=close, statistics=statistics, save_filename=save_filename)
 
-    def _render(self, mode='human', close=False, statistics=False):
+    def _render(self, mode='human', close=False, statistics=False, save_filename=None):
         if mode == 'human':
             if self.render_call == 0:
                 # if hasattr(self, 'fig'):
@@ -284,6 +284,10 @@ class PortfolioEnv(gym.Env):
 
             self.fig.canvas.draw()
             self.fig.canvas.flush_events()
+
+            if save_filename is not None:
+                self.fig.savefig(save_filename)
+                plt.close(self.fig)
 
     def _get_image(self, statistics=False):
         import io
