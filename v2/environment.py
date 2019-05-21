@@ -7,7 +7,6 @@ from copy import deepcopy
 import seaborn as sns
 
 
-
 def factor_history_csv():
     file_nm = 'data_for_metarl.csv'
     df = pd.read_csv(file_nm, index_col=0)
@@ -287,6 +286,7 @@ class PortfolioEnv(gym.Env):
 
             if save_filename is not None:
                 self.fig.savefig(save_filename)
+                print("fig saved.".format(save_filename))
                 plt.close(self.fig)
 
     def _get_image(self, statistics=False):
