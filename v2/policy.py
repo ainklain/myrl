@@ -1,6 +1,7 @@
 
 from test_rl.distribution import DiagonalGaussian
-from v2.environment import PortfolioEnv
+from v2.environment_batch import PortfolioEnv
+# 최신은 environment2
 
 from datetime import datetime
 import numpy as np
@@ -153,10 +154,10 @@ class Reptile:
         self.discrete = False
         self.s_dim = env.observation_space.shape
         if len(env.observation_space.shape) > 0:
-            self.a_dim = env.action_space.shape[0]
-            self.a_bound = (env.action_space.high - env.action_space.low) / 2.
-            self.a_min = env.action_space.low
-            self.a_max = env.action_space.high
+            self.a_dim = env.action_space.shape[0] - 1  # cash asset
+            self.a_min = env.action_space.low[:-1]
+            self.a_max = env.action_space.high[:-1]
+            self.a_bound = (self.a_max - self.a_min) / 2.
         else:
             self.a_dim = env.action_space.n
 
@@ -194,12 +195,12 @@ class Reptile:
             action = self.dist.sample({'mean': mu, 'log_std': self.log_sigma})
         else:
             action = mu
-        return self.action_to_constrained_weight(action), value_
-        # return self.action_to_weight_zero(action), value_
+        # return self.action_to_constrained_weight(action), value_
+        return action, value_
 
-    def action_to_constrained_weight(self, action):
-        action_clip = tf.clip_by_value(tf.squeeze(action), self.a_min, 1 / (self.a_dim - 1))
-        a_real = tf.concat([action_clip[:-1], tf.constant([1.]) - tf.reduce_sum(action_clip[:-1])], axis=0)
+    def action_to_constrained_weight(self, actions):
+        actions_clip = tf.clip_by_value(actions, self.a_min, 1 / self.a_dim)
+        a_real = tf.concat([actions_clip, tf.ones([actions.shape[0], 1]) - tf.reduce_sum(actions_clip, axis=1, keepdims=True)], axis=-1)
         return a_real
 
     def action_to_weight_logic(self, action):
@@ -225,6 +226,8 @@ class Reptile:
         s_batch, a_batch, r_batch, adv_batch = trajectory
         idx = np.arange(len(s_batch))
         np.random.shuffle(idx)
+
+        self.assign_old_network()
 
         batch_loss = 0
         batch_count = len(s_batch) // MINIBATCH
@@ -274,9 +277,15 @@ class Reptile:
         return grad
 
     def fast_train(self, env_t, n_fast_train, n_tr_samples=5):
+        st_sampling = time.time()
         trajectory_sample = self.sampler.get_tr_batch(n_tr_samples, self, env_t - self.M, env_t, render=False)
+        et_sampling = time.time()
+        st_grad = time.time()
         for _ in range(n_fast_train):
             _ = self.grad_loss(trajectory_sample, apply_minigrad=True)
+        et_grad = time.time()
+        print('[fast_train] sampling time : {} /// grad time: total={} | avg={}'.format(
+            et_sampling - st_sampling, et_grad - st_grad, (et_grad - st_grad) / n_fast_train))
 
     def metatrain(self, env_samples, n_fast_train=1, n_tr_samples=5):
         self.assign_old_network()
@@ -349,7 +358,6 @@ class Reptile:
         print("model loaded. (path: {})".format(f_name))
 
 
-
 class Sampler:
     def __init__(self, env):
         self.env = env
@@ -366,6 +374,66 @@ class Sampler:
                 adv_batch = np.concatenate([adv_batch, adv_tr], axis=0)
 
         return s_batch, a_batch, r_batch, adv_batch
+
+
+    def get_trajectories_batch(self, model, n_actors=1, begin_ts=[0], tr_length=64, render=False, stochastic=True, statistics=False):
+        # n_actors = 3; begin_t = [300, 500]; tr_length=64; render=False; stochastic=True; statistics=False
+        batches = [dict() for _ in len(begin_ts)]
+        for i, begin_t in enumerate(begin_ts):
+            batches[i]['begin_t'] = begin_t
+            batches[i]['data'] = {'buffer_s': [],
+                               'buffer_a': [],
+                               'buffer_v': [],
+                               'buffer_r': [],
+                               'buffer_done': []}
+
+        rolling_r = RunningStats()
+
+        states = self.env.reset(t0_arr=begin_ts, n_actors=n_actors)
+        dones = np.array([False for _ in range(n_actors * len(begin_ts))])
+        t_step = 0
+
+        for _ in range(tr_length):
+            actions, values = model.evaluate_state(states, stochastic=stochastic)
+            for i, begin_t in enumerate(begin_ts):
+                batches[i]['data']['buffer_s'].append(states)
+                batches[i]['data']['buffer_a'].append(actions)
+                batches[i]['data']['buffer_v'].append(tf.squeeze(values))
+                batches[i]['data']['buffer_done'].append(dones)
+
+            next_states, rewards, _, dones = self.env.step(model.action_to_constrained_weight(actions))
+
+            batches[i]['data']['buffer_r'].append(rewards)
+            t_step += 1
+
+            # print(t_step)
+            # if done:
+            #     states = self.env.reset(t0_arr=begin_ts, n_actors=n_actors)
+            #     done = False
+            #     t_step = 0
+
+        rewards = np.array(buffer_r)
+        rolling_r.update(rewards)
+        rewards = np.clip(rewards / rolling_r.std, -10, 10)
+
+        v_final = [tf.squeeze(v) * (1 - done)]
+        values = np.array(buffer_v + v_final)
+        dones = np.array(buffer_done + [done])
+
+        # Generalized Advantage Estimation
+        delta = rewards + GAMMA * values[1:] * (1 - dones[1:]) - values[:-1]
+        adv = discount(delta, GAMMA * LAMBDA, dones)
+        returns = adv + np.array(buffer_v)
+        adv = (adv - adv.mean()) / np.maximum(adv.std(), 1e-6)
+
+        s_batch, a_batch, r_batch, adv_batch = np.reshape(buffer_s, (tr_length,) + model.s_dim), \
+                                               np.vstack(buffer_a), np.vstack(returns), np.vstack(adv)
+
+        if render:
+            self.env.render(statistics)
+
+        return s_batch, a_batch, r_batch, adv_batch
+
 
     def get_trajectories(self, model, begin_t=None, end_t=None, render=False, stochastic=True, statistics=False):
         buffer_s, buffer_a, buffer_v, buffer_r, buffer_done = [], [], [], [], []
@@ -384,7 +452,7 @@ class Sampler:
             buffer_v.append(tf.squeeze(v))
             buffer_done.append(done)
 
-            s, r, _, done = self.env.step(a)
+            s, r, _, done = self.env.step(model.action_to_constrained_weight(a))
 
             buffer_r.append(r)
             t_step += 1
@@ -436,7 +504,7 @@ def main():
 
     # BATCH = 128
     M = 128     # support set 길이
-    K = 64     # target set 길이
+    K = 128     # target set 길이
     test_length = 20
     model = Reptile(env, M=M, K=K)
     # model = MetaPPO(env, M=M, K=K)
@@ -456,14 +524,14 @@ def main():
     # for t_step, t in enumerate(range(t_start, T - test_length, test_length)):
     for t_step, t in enumerate(range(t_start, t_start + 1)):
         print("t: {}".format(t))
-        env_samples = np.random.choice(M + np.arange(initial_t + t_step * test_length), n_envs, replace=True)
-        # env_samples = [268, 300]
+        # env_samples = np.random.choice(M + np.arange(initial_t + t_step * test_length), n_envs, replace=True)
+        env_samples = [300, 500]
 
         # train time
         EP_MAX = 3000
         for ep in range(EP_MAX + 1):
             s_train = time.time()
-            model.metatrain(env_samples,  n_fast_train=1, n_tr_samples=20)
+            model.metatrain(env_samples,  n_fast_train=1, n_tr_samples=10)
             e_train = time.time()
             print("[TRAIN] t: {} / ep: {} ({} sec per ep)".format(t, ep, e_train - s_train))
             if ep % 5 == 0:
@@ -472,7 +540,7 @@ def main():
 
             if ep % 20 == 0:
                 for j in range(len(env_samples)):
-                    model.fast_train(env_samples[j], n_fast_train=1, n_tr_samples=20)
+                    model.fast_train(env_samples[j], n_fast_train=1, n_tr_samples=5)
                     s_temp = env.reset(env_samples[j])
                     for n in range(K):
                         s_test = time.time()
@@ -771,7 +839,7 @@ class MetaPPO:
 
 def test():
     # model_name = 'meta_ppo_shared_invest_singletest_n'
-    model_name = 'meta_ppo_shared_invest_n_small'
+    model_name = 'meta_ppo_shared_invest_n_small_newenv'
     f_name = './{}.pkl'.format(model_name)
     ENVIRONMENT = 'PortfolioEnv'
 
@@ -784,7 +852,7 @@ def test():
 
     # BATCH = 128
     M = 128     # support set 길이
-    K = 64     # target set 길이
+    K = 128     # target set 길이
     test_length = 20
     model = Reptile(env, M=M, K=K)
     # model = MetaPPO(env, M=M, K=K)
@@ -802,36 +870,39 @@ def test():
     t_step = 0
 
     for ep in range(1000):
-        for _ in range(10):
-            model.fast_train(212, n_fast_train=1, n_tr_samples=20)
+        for _ in range(5):
+            model.fast_train(500+M, n_fast_train=1, n_tr_samples=5)
             model.update_optim()
 
-        s_temp = env.reset(212-M)
+        s_temp = env.reset(t0=[300, 500], n_actors=5)
         for n in range(K):
             s_test = time.time()
             a_temp, v_temp = model.evaluate_state(s_temp, stochastic=True)
-            s_temp, r_temp, _, done_temp = env.step(a_temp)
+            s_temp, r_temp, _, done_temp = env.step(model.action_to_constrained_weight(a_temp))
 
             e_test = time.time()
+            if done_temp:
+                break
 
         img_path = ".//img//{}//".format(0)
         if not os.path.exists(img_path):
             os.makedirs(img_path)
 
-        env.render(statistics=True, save_filename=img_path + "ep_{}_envt_{}.png".format(210 + ep, 212))
+        env.render(statistics=True, save_filename=img_path + "ep_{}_envt_{}.png".format(420 + ep, 212))
 
         if ep % 10 == 0:
-            s_temp = env.reset(212-M)
+            s_temp = env.reset(500)
             for n in range(K):
                 s_test = time.time()
                 a_temp, v_temp = model.evaluate_state(s_temp, stochastic=False)
-                s_temp, r_temp, _, done_temp = env.step(a_temp)
-
+                s_temp, r_temp, _, done_temp = env.step(model.action_to_constrained_weight(a_temp))
                 e_test = time.time()
+                if done_temp:
+                    break
 
             img_path = ".//img//{}//".format(0)
             if not os.path.exists(img_path):
                 os.makedirs(img_path)
 
-            env.render(statistics=True, save_filename=img_path + "test_ep_{}_envt_{}.png".format(210 + ep, 212))
+            env.render(statistics=True, save_filename=img_path + "test_ep_{}_envt_{}.png".format(420 + ep, 212))
 
