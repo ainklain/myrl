@@ -1,6 +1,7 @@
 
 from test_rl.distribution import DiagonalGaussian
 from v2.environment_batch import PortfolioEnv
+from v2.environment2 import PortfolioEnv as PrevEnv
 # 최신은 environment2
 
 from datetime import datetime
@@ -222,8 +223,12 @@ class Reptile:
                 action, action_clip, a_temp, a_real, np.sum(a_real)))
         return a_real
 
-    def grad_loss(self, trajectory, apply_minigrad=False):
-        s_batch, a_batch, r_batch, adv_batch = trajectory
+    def grad_loss(self, batch_sample, apply_minigrad=False):
+        s_batch = batch_sample['data']['s_batch']
+        a_batch = batch_sample['data']['a_batch']
+        r_batch = batch_sample['data']['r_batch']
+        adv_batch = batch_sample['data']['adv_batch']
+
         idx = np.arange(len(s_batch))
         np.random.shuffle(idx)
 
@@ -276,26 +281,24 @@ class Reptile:
 
         return grad
 
-    def fast_train(self, env_t, n_fast_train, n_tr_samples=5):
-        st_sampling = time.time()
-        trajectory_sample = self.sampler.get_tr_batch(n_tr_samples, self, env_t - self.M, env_t, render=False)
-        et_sampling = time.time()
-        st_grad = time.time()
-        for _ in range(n_fast_train):
-            _ = self.grad_loss(trajectory_sample, apply_minigrad=True)
-        et_grad = time.time()
-        print('[fast_train] sampling time : {} /// grad time: total={} | avg={}'.format(
-            et_sampling - st_sampling, et_grad - st_grad, (et_grad - st_grad) / n_fast_train))
+    def fast_train(self, env_sample, n_actors=5):
+        [batch_sample] = self.sampler.get_trajectories_batch(self, n_actors=n_actors, begin_ts=env_sample - self.M, tr_length=self.M)
+        _ = self.grad_loss(batch_sample, apply_minigrad=True)
 
-    def metatrain(self, env_samples, n_fast_train=1, n_tr_samples=5):
+    def metatrain(self, env_samples, n_actors=5):
         self.assign_old_network()
-
+        self.param_network.set_weights(self.optim_param_net_wgt)
+        self.log_sigma.assign(self.optim_log_sigma_wgt)
+        st_batch = time.time()
+        batches = self.sampler.get_trajectories_batch(self, n_actors=n_actors, begin_ts=env_samples - self.M, tr_length=self.M)
+        et_batch = time.time()
+        print("trj. sampling time : {} (n_actors: {} / begin_ts: {})".format(et_batch - st_batch, n_actors, len(env_samples)))
         meta_param = None
         meta_log_sigma = None
-        for env_i, env_t in enumerate(env_samples):
+        for batch_sample in batches:
             self.param_network.set_weights(self.optim_param_net_wgt)
             self.log_sigma.assign(self.optim_log_sigma_wgt)
-            self.fast_train(env_t, n_fast_train, n_tr_samples)
+            _ = self.grad_loss(batch_sample, apply_minigrad=True)
 
             param_net_wgt = self.param_network.get_weights()
             log_sigma_wgt = self.log_sigma.numpy()
@@ -315,8 +318,8 @@ class Reptile:
         self.optim_param_net_wgt = meta_param
         self.optim_log_sigma_wgt = meta_log_sigma
 
-        a_sample, _ = self.evaluate_state(self.sampler.env.reset(env_t))
-        print("sample action: {} (sum: {})".format(a_sample, np.sum(a_sample)))
+        a_sample, _ = self.evaluate_state(self.sampler.env.reset(env_samples))
+        print("sample action: {} (sum: {})".format(a_sample, np.sum(a_sample, axis=1)))
         print('log sigma: {}'.format(meta_log_sigma))
 
     def polynomial_epsilon_decay(self, learning_rate, global_step, decay_steps, end_learning_rate, power):
@@ -375,7 +378,6 @@ class Sampler:
 
         return s_batch, a_batch, r_batch, adv_batch
 
-
     def get_trajectories_batch(self, model, n_actors=1, begin_ts=[0], tr_length=64, render=False, stochastic=True, statistics=False):
         # n_actors = 3; begin_ts = [300, 500]; tr_length=64; render=False; stochastic=True; statistics=False
         buffers = [dict() for _ in range(len(begin_ts))]
@@ -396,15 +398,15 @@ class Sampler:
         for _ in range(tr_length):
             actions, values = model.evaluate_state(states, stochastic=stochastic)
             for i in range(len(begin_ts)):
-                buffers[i]['data']['buffer_s'].append(states[i * n_actors:(i + 1) * n_actors])
-                buffers[i]['data']['buffer_a'].append(actions[i * n_actors:(i + 1) * n_actors])
-                buffers[i]['data']['buffer_v'].append(values[i * n_actors:(i + 1) * n_actors])
+                buffers[i]['data']['buffer_s'].append(np.expand_dims(states[i * n_actors:(i + 1) * n_actors], axis=1))
+                buffers[i]['data']['buffer_a'].append(np.expand_dims(actions[i * n_actors:(i + 1) * n_actors], axis=1))
+                buffers[i]['data']['buffer_v'].append(tf.squeeze(values[i * n_actors:(i + 1) * n_actors]))
                 buffers[i]['data']['buffer_done'].append(dones[i * n_actors:(i + 1) * n_actors])
 
             next_states, rewards, _, dones = self.env.step(model.action_to_constrained_weight(actions))
 
             for i in range(len(begin_ts)):
-                buffers[i]['data']['buffer_r'].append(rewards[i * n_actors:(i + 1) * n_actors])
+                buffers[i]['data']['buffer_r'].append(tf.squeeze(rewards[i * n_actors:(i + 1) * n_actors]))
             t_step += 1
 
         # print(t_step)
@@ -413,30 +415,43 @@ class Sampler:
         #     done = False
         #     t_step = 0
 
-        batches = []
+        batches = [dict() for _ in range(len(begin_ts))]
         for i, begin_t in enumerate(begin_ts):
-            rewards = np.vstack(buffers[i]['data']['buffer_r'])
-            rolling_r.update(rewards)
-            rewards = np.clip(rewards / rolling_r.std, -10, 10)
+            buffer_r = np.array(buffers[i]['data']['buffer_r'])
+            rolling_r.update(buffer_r)
+            buffer_r = np.clip(buffer_r / rolling_r.std, -10, 10)
 
             v_final = tf.squeeze(values[i * n_actors:(i + 1) * n_actors]) * (1 - dones[i * n_actors:(i + 1) * n_actors])
-            values = np.vstack(buffers[i]['data']['buffer_v'] + [tf.reshape(v_final, [-1, 1])])
-            dones = np.array(buffers[i]['data']['buffer_done'] + [dones])
+            buffer_v = np.vstack(buffers[i]['data']['buffer_v'] + [v_final])
+            buffer_done = np.vstack(buffers[i]['data']['buffer_done'] + [dones[i * n_actors:(i + 1) * n_actors]])
 
             # Generalized Advantage Estimation
-            delta = rewards + GAMMA * values[1:] * (1 - dones[1:]) - values[:-1]
-            adv = discount(delta, GAMMA * LAMBDA, dones)
-            returns = adv + np.array(buffers[i]['data']['buffer_v'])
-            adv = (adv - adv.mean()) / np.maximum(adv.std(), 1e-6)
+            buffer_delta = buffer_r + GAMMA * buffer_v[1:] * (1 - buffer_done[1:]) - buffer_v[:-1]
+            buffer_adv = discount(buffer_delta, GAMMA * LAMBDA, buffer_done)
+            returns = buffer_adv + np.array(buffers[i]['data']['buffer_v'])
+            buffer_adv = (buffer_adv - buffer_adv.mean(axis=0)) / np.maximum(buffer_adv.std(axis=0), 1e-6)
 
-            s_batch, a_batch, r_batch, adv_batch = np.reshape(buffer_s, (tr_length,) + model.s_dim), \
-                                                   np.vstack(buffer_a), np.vstack(returns), np.vstack(adv)
+            buffer_s = np.concatenate(buffers[i]['data']['buffer_s'], axis=1)
+            buffer_a = np.concatenate(buffers[i]['data']['buffer_a'], axis=1)
+            for j in range(n_actors):
+                if j == 0:
+                    s_batch, a_batch, r_batch, adv_batch = buffer_s[j], buffer_a[j], returns[:, j], buffer_adv[:, j]
+                else:
+                    s_batch = np.concatenate([s_batch, buffer_s[j]], axis=0)
+                    a_batch = np.concatenate([a_batch, buffer_a[j]], axis=0)
+                    r_batch = np.concatenate([r_batch, returns[:, j]], axis=0)
+                    adv_batch = np.concatenate([adv_batch, buffer_adv[:, j]], axis=0)
+
+            batches[i]['begin_t'] = begin_t
+            batches[i]['data'] = {'s_batch': s_batch,
+                                  'a_batch': a_batch,
+                                  'r_batch': r_batch,
+                                  'adv_batch': adv_batch}
 
         if render:
             self.env.render(statistics)
 
-        return s_batch, a_batch, r_batch, adv_batch
-
+        return batches
 
     def get_trajectories(self, model, begin_t=None, end_t=None, render=False, stochastic=True, statistics=False):
         buffer_s, buffer_a, buffer_v, buffer_r, buffer_done = [], [], [], [], []
@@ -448,7 +463,7 @@ class Sampler:
 
         tr_length = end_t - begin_t
         while len(buffer_r) < tr_length:
-            a, v = model.evaluate_state(s, stochastic=stochastic)
+            a, v = model.evaluate_state(tf.expand_dims(s, axis=0), stochastic=stochastic)
 
             buffer_s.append(s)
             buffer_a.append(a)
@@ -523,18 +538,18 @@ def main():
     T = env.len_timeseries
     t = t_start
     t_step = 0
-    s = main_env.reset(t)
+    # s = main_env.reset([t])
     # for t_step, t in enumerate(range(t_start, T - test_length, test_length)):
     for t_step, t in enumerate(range(t_start, t_start + 1)):
         print("t: {}".format(t))
         # env_samples = np.random.choice(M + np.arange(initial_t + t_step * test_length), n_envs, replace=True)
-        env_samples = [300, 500]
+        env_samples = np.array([300, 500])
 
         # train time
         EP_MAX = 3000
         for ep in range(EP_MAX + 1):
             s_train = time.time()
-            model.metatrain(env_samples,  n_fast_train=1, n_tr_samples=10)
+            model.metatrain(env_samples, n_actors=10)
             e_train = time.time()
             print("[TRAIN] t: {} / ep: {} ({} sec per ep)".format(t, ep, e_train - s_train))
             if ep % 5 == 0:
@@ -543,12 +558,12 @@ def main():
 
             if ep % 20 == 0:
                 for j in range(len(env_samples)):
-                    model.fast_train(env_samples[j], n_fast_train=1, n_tr_samples=5)
-                    s_temp = env.reset(env_samples[j])
+                    model.fast_train(env_samples[j:(j+1)], n_actors=5)
+                    s_temp = env.reset(env_samples[j:(j+1)])
                     for n in range(K):
                         s_test = time.time()
                         a_temp, v_temp = model.evaluate_state(s_temp, stochastic=True)
-                        s_temp, r_temp, _, done_temp = env.step(a_temp)
+                        s_temp, r_temp, _, done_temp = env.step(model.action_to_constrained_weight(a_temp))
                         e_test = time.time()
 
                     img_path = ".//img//{}//".format(j)
@@ -564,7 +579,7 @@ def main():
                     for n in range(K):
                         s_test = time.time()
                         a_temp, v_temp = model.evaluate_state(s_temp, stochastic=False)
-                        s_temp, r_temp, _, done_temp = env.step(a_temp)
+                        s_temp, r_temp, _, done_temp = env.step(model.action_to_constrained_weight(a_temp))
                         e_test = time.time()
 
                     img_path = ".//img//test//{}//".format(j)
@@ -908,4 +923,5 @@ def test():
                 os.makedirs(img_path)
 
             env.render(statistics=True, save_filename=img_path + "test_ep_{}_envt_{}.png".format(420 + ep, 212))
+
 
