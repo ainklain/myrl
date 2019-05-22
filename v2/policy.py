@@ -377,15 +377,15 @@ class Sampler:
 
 
     def get_trajectories_batch(self, model, n_actors=1, begin_ts=[0], tr_length=64, render=False, stochastic=True, statistics=False):
-        # n_actors = 3; begin_t = [300, 500]; tr_length=64; render=False; stochastic=True; statistics=False
-        batches = [dict() for _ in len(begin_ts)]
+        # n_actors = 3; begin_ts = [300, 500]; tr_length=64; render=False; stochastic=True; statistics=False
+        buffers = [dict() for _ in range(len(begin_ts))]
         for i, begin_t in enumerate(begin_ts):
-            batches[i]['begin_t'] = begin_t
-            batches[i]['data'] = {'buffer_s': [],
-                               'buffer_a': [],
-                               'buffer_v': [],
-                               'buffer_r': [],
-                               'buffer_done': []}
+            buffers[i]['begin_t'] = begin_t
+            buffers[i]['data'] = {'buffer_s': [],
+                                  'buffer_a': [],
+                                  'buffer_v': [],
+                                  'buffer_r': [],
+                                  'buffer_done': []}
 
         rolling_r = RunningStats()
 
@@ -395,39 +395,42 @@ class Sampler:
 
         for _ in range(tr_length):
             actions, values = model.evaluate_state(states, stochastic=stochastic)
-            for i, begin_t in enumerate(begin_ts):
-                batches[i]['data']['buffer_s'].append(states)
-                batches[i]['data']['buffer_a'].append(actions)
-                batches[i]['data']['buffer_v'].append(tf.squeeze(values))
-                batches[i]['data']['buffer_done'].append(dones)
+            for i in range(len(begin_ts)):
+                buffers[i]['data']['buffer_s'].append(states[i * n_actors:(i + 1) * n_actors])
+                buffers[i]['data']['buffer_a'].append(actions[i * n_actors:(i + 1) * n_actors])
+                buffers[i]['data']['buffer_v'].append(values[i * n_actors:(i + 1) * n_actors])
+                buffers[i]['data']['buffer_done'].append(dones[i * n_actors:(i + 1) * n_actors])
 
             next_states, rewards, _, dones = self.env.step(model.action_to_constrained_weight(actions))
 
-            batches[i]['data']['buffer_r'].append(rewards)
+            for i in range(len(begin_ts)):
+                buffers[i]['data']['buffer_r'].append(rewards[i * n_actors:(i + 1) * n_actors])
             t_step += 1
 
-            # print(t_step)
-            # if done:
-            #     states = self.env.reset(t0_arr=begin_ts, n_actors=n_actors)
-            #     done = False
-            #     t_step = 0
+        # print(t_step)
+        # if done:
+        #     states = self.env.reset(t0_arr=begin_ts, n_actors=n_actors)
+        #     done = False
+        #     t_step = 0
 
-        rewards = np.array(buffer_r)
-        rolling_r.update(rewards)
-        rewards = np.clip(rewards / rolling_r.std, -10, 10)
+        batches = []
+        for i, begin_t in enumerate(begin_ts):
+            rewards = np.vstack(buffers[i]['data']['buffer_r'])
+            rolling_r.update(rewards)
+            rewards = np.clip(rewards / rolling_r.std, -10, 10)
 
-        v_final = [tf.squeeze(v) * (1 - done)]
-        values = np.array(buffer_v + v_final)
-        dones = np.array(buffer_done + [done])
+            v_final = tf.squeeze(values[i * n_actors:(i + 1) * n_actors]) * (1 - dones[i * n_actors:(i + 1) * n_actors])
+            values = np.vstack(buffers[i]['data']['buffer_v'] + [tf.reshape(v_final, [-1, 1])])
+            dones = np.array(buffers[i]['data']['buffer_done'] + [dones])
 
-        # Generalized Advantage Estimation
-        delta = rewards + GAMMA * values[1:] * (1 - dones[1:]) - values[:-1]
-        adv = discount(delta, GAMMA * LAMBDA, dones)
-        returns = adv + np.array(buffer_v)
-        adv = (adv - adv.mean()) / np.maximum(adv.std(), 1e-6)
+            # Generalized Advantage Estimation
+            delta = rewards + GAMMA * values[1:] * (1 - dones[1:]) - values[:-1]
+            adv = discount(delta, GAMMA * LAMBDA, dones)
+            returns = adv + np.array(buffers[i]['data']['buffer_v'])
+            adv = (adv - adv.mean()) / np.maximum(adv.std(), 1e-6)
 
-        s_batch, a_batch, r_batch, adv_batch = np.reshape(buffer_s, (tr_length,) + model.s_dim), \
-                                               np.vstack(buffer_a), np.vstack(returns), np.vstack(adv)
+            s_batch, a_batch, r_batch, adv_batch = np.reshape(buffer_s, (tr_length,) + model.s_dim), \
+                                                   np.vstack(buffer_a), np.vstack(returns), np.vstack(adv)
 
         if render:
             self.env.render(statistics)

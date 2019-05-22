@@ -66,7 +66,7 @@ class PortfolioSim(object):
             last_nav = np.ones([len(actions), 1])
             last_asset_nav = np.ones_like(actions)
         else:
-            last_nav = self.navs[:, self.step_count - 1]
+            last_nav = self.navs[:, (self.step_count - 1):self.step_count]
             last_asset_nav = self.assets_nav[:, :, self.step_count - 1]
         self.navs[:, self.step_count:(self.step_count+1)] = last_nav * (1. + instant_rewards)
         self.assets_nav[:, :, self.step_count] = last_asset_nav * (1. + asset_returns)
@@ -80,8 +80,8 @@ class PortfolioSim(object):
 
         infos = {'instant_reward': deepcopy(instant_rewards),
                 'winning_reward': deepcopy(winning_rewards),
-                'nav': deepcopy(self.navs[self.step_count]),
-                'costs': deepcopy(self.costs[self.step_count])}
+                'nav': deepcopy(self.navs[:, self.step_count]),
+                'costs': deepcopy(self.costs[:, self.step_count])}
 
         self.step_count += 1
         return total_rewards, infos, self.dones
