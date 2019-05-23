@@ -42,10 +42,11 @@ class PortfolioSim(object):
         self.last_pos = np.zeros([n_sims, len(self.asset_list)])
         self.dones = np.array([False for _ in range(n_sims)])
 
+        self.actions_arr = np.zeros([n_sims, len(self.asset_list), max_path_length])
         self.asset_returns_arr = np.zeros([n_sims, len(self.asset_list), max_path_length])
-        self.macro_returns_arr = np.zeros([n_sims, len(self.macro_list), max_path_length])
-        # if self.macros_return_df is not None:
-        #     self.macros_return_df = self.macros_return_df.iloc[0:0]
+
+        if self.macro_list is not None:
+            self.macro_returns_arr = np.zeros([n_sims, len(self.macro_list), max_path_length])
 
     def _step(self, actions, asset_returns, macro_returns=None):
         eps = 1e-8
@@ -53,13 +54,15 @@ class PortfolioSim(object):
         if macro_returns is not None:
             self.macro_returns_arr[:, :, self.step_count] = macro_returns
 
+        self.actions_arr[:, :, self.step_count] = actions
+
         positions = ((asset_returns + 1.) * actions) / (np.sum((asset_returns + 1.) * actions, axis=1, keepdims=True) + eps)
         trades = actions - self.last_pos
         self.last_pos = positions
 
         trade_costs_pct = np.sum(abs(trades), axis=1, keepdims=True) * self.trading_cost
-        costs = trade_costs_pct
-        instant_rewards = (np.sum((asset_returns + 1.) * actions, axis=1, keepdims=True) - 1.) - costs
+        self.costs[:, self.step_count:(self.step_count+1)] = trade_costs_pct
+        instant_rewards = (np.sum((asset_returns + 1.) * actions, axis=1, keepdims=True) - 1.) - self.costs[:, self.step_count:(self.step_count+1)]
 
         # if self.step_count != 0:
         if self.step_count == 0:
@@ -89,6 +92,8 @@ class PortfolioSim(object):
     def evaluate_reward2(self):
         winning_reward = np.zeros([self.n_sims, 1])
         for sim_i in range(self.n_sims):
+            if self.dones[sim_i] is True:
+                continue
             if self.step_count == (self.max_path_length - 1):         # 최대 기간 도달
                 self.dones[sim_i] = True
                 if self.navs[sim_i, self.step_count] >= (1 + 0.05 * (self.step_count / 250)):      # 1년 5 % 이상 (목표)
@@ -96,7 +101,7 @@ class PortfolioSim(object):
                 else:
                     winning_reward[sim_i] = -1
             elif self.navs[sim_i, self.step_count] < self.lower_bound[sim_i, self.step_count]:
-                self.dones[sim_i] = False
+                self.dones[sim_i] = True
                 winning_reward[sim_i] = -10
             elif self.step_count % 20 == 0:
                 self.dones[sim_i] = False
@@ -142,15 +147,16 @@ class PortfolioSim(object):
     def export(self):
         exported_data = dict()
         exported_data['last_step'] = self.step_count
-        exported_data['asset_returns_df'] = self.asset_returns_arr[:, :, :self.step_count]
-        exported_data['macro_returns_df'] = self.macro_returns_arr[:, :, :self.step_count]
+        exported_data['asset_returns_arr'] = self.asset_returns_arr[:, :, :self.step_count]
+        exported_data['macro_returns_arr'] = self.macro_returns_arr[:, :, :self.step_count]
+        exported_data['actions_arr'] = self.actions_arr[:, :, :self.step_count]
         exported_data['navs'] = self.navs[:, :self.step_count]
         exported_data['lower_bound'] = self.lower_bound[:, :self.step_count]
         exported_data['nav_returns'] = np.concatenate([self.navs[:, 0:1] - 1.,
                                                        self.navs[:, 1:] / self.navs[:, :-1] - 1.], axis=-1)[:, :self.step_count]
-        exported_data['ew_nav'] = np.mean(np.cumprod(1 + self.asset_returns_arr, axis=2), axis=1).values[:, :self.step_count]
-        exported_data['ew_returns'] = np.concatenate([exported_data['ew_nav'][0:1] - 1., exported_data['ew_nav'][1:] / exported_data['ew_nav'][:-1] - 1.])[:, :self.step_count]
-        # exported_data['costs'] = self.costs[:, :self.step_count]
+        exported_data['ew_nav'] = np.mean(np.cumprod(1 + self.asset_returns_arr, axis=2), axis=1)[:, :self.step_count]
+        exported_data['ew_returns'] = np.concatenate([exported_data['ew_nav'][:, 0:1] - 1., exported_data['ew_nav'][:, 1:] / exported_data['ew_nav'][:, :-1] - 1.], axis=-1)[:, :self.step_count]
+        exported_data['costs'] = self.costs[:, :self.step_count]
         exported_data['rewards_history'] = self.rewards_history[:, :self.step_count]
 
         return deepcopy(exported_data)
@@ -309,42 +315,43 @@ class PortfolioEnv(gym.Env):
         render_data = self.sim.export()
         last_step = render_data['last_step']
         x_ = np.arange(last_step)
-        self.ax1.plot(x_, render_data['navs'], color='k')
-        self.ax1.plot(x_, render_data['ew_nav'], color='b')
-        self.ax1.plot(x_, render_data['lower_bound'], color='r')
+        nav_squeeze = np.squeeze(render_data['navs'])
+        ew_nav_squeeze = np.squeeze(render_data['ew_nav'])
+        self.ax1.plot(x_, nav_squeeze, color='k')
+        self.ax1.plot(x_, ew_nav_squeeze, color='b')
+        self.ax1.plot(x_, np.squeeze(render_data['lower_bound']), color='r')
 
-        actions_t = np.transpose(render_data['actions'])
+        actions_squeeze = np.squeeze(render_data['actions_arr'])
         pal = sns.color_palette("hls", 19)
-        self.ax2.stackplot(x_, actions_t, colors=pal)
+        self.ax2.stackplot(x_, actions_squeeze, colors=pal)
 
-        asset_returns_df = render_data['asset_returns_df']
-        asset_list = asset_returns_df.columns
-        asset_cum_returns_t = np.cumprod(1 + np.transpose(asset_returns_df.values), axis=1)
-        for i in range(len(asset_list)):
-            self.ax3.plot(x_, asset_cum_returns_t[i], color=pal[i])
+        asset_returns_arr = np.squeeze(render_data['asset_returns_arr'])
+        asset_cum_returns_squeeze = np.cumprod(1 + asset_returns_arr, axis=1)
+        for i in range(len(self.asset_list)):
+            self.ax3.plot(x_, asset_cum_returns_squeeze[i], color=pal[i])
 
-        self.ax4.plot(x_, render_data['rewards_history'])
+        self.ax4.plot(x_, np.squeeze(render_data['rewards_history']))
 
         if statistics:
             mean_return = np.mean(render_data['nav_returns']) * 250
             std_return = np.std(render_data['nav_returns'], ddof=1) * np.sqrt(250)
-            cum_return = render_data['navs'][-1] - 1
+            cum_return = nav_squeeze[-1] - 1
             total_cost = np.sum(render_data['costs'])
 
             ew_mean_return = np.mean(render_data['ew_returns']) * 250
             ew_std_return = np.std(render_data['ew_returns'], ddof=1) * np.sqrt(250)
-            ew_cum_return = render_data['ew_nav'][-1] - 1
+            ew_cum_return = ew_nav_squeeze[-1] - 1
 
             max_nav = 1.
             max_nav_i = 0
             mdd_i = 0.
             mdd = list()
             for i in range(last_step):
-                if render_data['navs'][i] >= max_nav:
-                    max_nav = render_data['navs'][i]
+                if nav_squeeze[i] >= max_nav:
+                    max_nav = nav_squeeze[i]
                     max_nav_i = i
                 else:
-                    mdd_i = np.min(render_data['navs'][max_nav_i:(i+1)]) / max_nav - 1.
+                    mdd_i = np.min(nav_squeeze[max_nav_i:(i+1)]) / max_nav - 1.
                 mdd.append(mdd_i)
             max_mdd = np.min(mdd)
 

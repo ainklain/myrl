@@ -200,7 +200,7 @@ class Reptile:
         return action, value_
 
     def action_to_constrained_weight(self, actions):
-        actions_clip = tf.clip_by_value(actions, self.a_min, 1 / self.a_dim)
+        actions_clip = tf.clip_by_value(actions, self.a_min, self.a_max) / self.a_dim
         a_real = tf.concat([actions_clip, tf.ones([actions.shape[0], 1]) - tf.reduce_sum(actions_clip, axis=1, keepdims=True)], axis=-1)
         return a_real
 
@@ -223,69 +223,70 @@ class Reptile:
                 action, action_clip, a_temp, a_real, np.sum(a_real)))
         return a_real
 
-    def grad_loss(self, batch_sample, apply_minigrad=False):
+    def grad_loss(self, batch_sample, n_epochs=1, apply_minigrad=False):
         s_batch = batch_sample['data']['s_batch']
         a_batch = batch_sample['data']['a_batch']
         r_batch = batch_sample['data']['r_batch']
         adv_batch = batch_sample['data']['adv_batch']
 
-        idx = np.arange(len(s_batch))
-        np.random.shuffle(idx)
-
         self.assign_old_network()
 
-        batch_loss = 0
         batch_count = len(s_batch) // MINIBATCH
-        for i in range(batch_count):
-            epsilon_decay = self.polynomial_epsilon_decay(0.1, self.global_step, 1e5, 0.01, power=0.0)
-            s_mini = s_batch[idx[i * MINIBATCH: (i + 1) * MINIBATCH]]
-            a_mini = a_batch[idx[i * MINIBATCH: (i + 1) * MINIBATCH]]
-            r_mini = r_batch[idx[i * MINIBATCH: (i + 1) * MINIBATCH]]
-            adv_mini = adv_batch[idx[i * MINIBATCH: (i + 1) * MINIBATCH]]
-            with tf.GradientTape() as tape:
-                mu_old, v_old = self.old_param_network(s_mini)
-                mu, v = self.param_network(s_mini)
-                ratio = self.dist.likelihood_ratio_sym(
-                    a_mini,
-                    {'mean': mu_old * self.a_bound, 'log_std': self.old_log_sigma},
-                    {'mean': mu * self.a_bound, 'log_std': self.log_sigma})
-                # ratio = tf.maximum(logli, 1e-6) / tf.maximum(old_logli, 1e-6)
-                ratio = tf.clip_by_value(ratio, 0, 10)
-                surr1 = adv_mini.squeeze() * ratio
-                surr2 = adv_mini.squeeze() * tf.clip_by_value(ratio, 1 - epsilon_decay, 1 + epsilon_decay)
-                loss_pi = - tf.reduce_mean(tf.minimum(surr1, surr2))
+        for epoch in range(n_epochs):
+            idx = np.arange(len(s_batch))
+            np.random.shuffle(idx)
 
-                clipped_value_estimate = v_old + tf.clip_by_value(v - v_old, -epsilon_decay, epsilon_decay)
-                loss_v1 = tf.math.squared_difference(clipped_value_estimate, r_mini)
-                loss_v2 = tf.math.squared_difference(v, r_mini)
-                loss_v = tf.reduce_mean(tf.maximum(loss_v1, loss_v2)) * 0.5
+            batch_loss = 0
+            for i in range(batch_count):
+                epsilon_decay = self.polynomial_epsilon_decay(0.1, self.global_step, 1e5, 0.01, power=0.0)
+                s_mini = s_batch[idx[i * MINIBATCH: (i + 1) * MINIBATCH]]
+                a_mini = a_batch[idx[i * MINIBATCH: (i + 1) * MINIBATCH]]
+                r_mini = r_batch[idx[i * MINIBATCH: (i + 1) * MINIBATCH]]
+                adv_mini = adv_batch[idx[i * MINIBATCH: (i + 1) * MINIBATCH]]
+                with tf.GradientTape() as tape:
+                    mu_old, v_old = self.old_param_network(s_mini)
+                    mu, v = self.param_network(s_mini)
+                    ratio = self.dist.likelihood_ratio_sym(
+                        a_mini,
+                        {'mean': mu_old * self.a_bound, 'log_std': self.old_log_sigma},
+                        {'mean': mu * self.a_bound, 'log_std': self.log_sigma})
+                    # ratio = tf.maximum(logli, 1e-6) / tf.maximum(old_logli, 1e-6)
+                    ratio = tf.clip_by_value(ratio, 0, 10)
+                    surr1 = adv_mini.squeeze() * ratio
+                    surr2 = adv_mini.squeeze() * tf.clip_by_value(ratio, 1 - epsilon_decay, 1 + epsilon_decay)
+                    loss_pi = - tf.reduce_mean(tf.minimum(surr1, surr2))
 
-                entropy = self.dist.entropy({'mean': mu, 'log_std': self.log_sigma})
-                pol_entpen = -ENTROPY_BETA * tf.reduce_mean(entropy)
+                    clipped_value_estimate = v_old + tf.clip_by_value(v - v_old, -epsilon_decay, epsilon_decay)
+                    loss_v1 = tf.math.squared_difference(clipped_value_estimate, r_mini)
+                    loss_v2 = tf.math.squared_difference(v, r_mini)
+                    loss_v = tf.reduce_mean(tf.maximum(loss_v1, loss_v2)) * 0.5
 
-                loss = loss_pi + loss_v * VF_COEFF + pol_entpen
+                    entropy = self.dist.entropy({'mean': mu, 'log_std': self.log_sigma})
+                    pol_entpen = -ENTROPY_BETA * tf.reduce_mean(entropy)
 
-            minigrad = tape.gradient(loss, self.param_network.trainable_variables + [self.log_sigma])
-            if apply_minigrad:
-                self.optimizer.apply_gradients(zip(minigrad, self.param_network.trainable_variables + [self.log_sigma]))
+                    loss = loss_pi + loss_v * VF_COEFF + pol_entpen
 
-            if i == 0:
-                grad = [minigrad[j] / batch_count for j in range(len(minigrad))]
-            else:
-                grad = [grad[j] + minigrad[j] / batch_count for j in range(len(minigrad))]
+                minigrad = tape.gradient(loss, self.param_network.trainable_variables + [self.log_sigma])
+                if apply_minigrad:
+                    self.optimizer.apply_gradients(zip(minigrad, self.param_network.trainable_variables + [self.log_sigma]))
 
-            batch_loss += loss.numpy() / batch_count
+                if i == 0:
+                    grad = [minigrad[j] / batch_count for j in range(len(minigrad))]
+                else:
+                    grad = [grad[j] + minigrad[j] / batch_count for j in range(len(minigrad))]
 
-        print('loss: {} (last: loss_pi:{:.4f}/loss_v:{:.4f}/pol_entpen:{:.4f}'.format(
-            batch_loss, loss_pi, loss_v, pol_entpen))
+                batch_loss += loss.numpy() / batch_count
+
+            print('[env:{} ep:{}] loss: {} (last: loss_pi:{:.4f}/loss_v:{:.4f}/pol_entpen:{:.4f}'.format(
+                batch_sample['begin_t'], epoch, batch_loss, loss_pi, loss_v, pol_entpen))
 
         return grad
 
-    def fast_train(self, env_sample, n_actors=5):
-        [batch_sample] = self.sampler.get_trajectories_batch(self, n_actors=n_actors, begin_ts=env_sample - self.M, tr_length=self.M)
-        _ = self.grad_loss(batch_sample, apply_minigrad=True)
+    def fast_train(self, env_sample, n_actors=5, n_epochs=1):
+        [batch_sample] = self.sampler.get_trajectories_batch(self, n_actors=n_actors, begin_ts=env_sample-self.M, tr_length=self.M)
+        _ = self.grad_loss(batch_sample, n_epochs=n_epochs, apply_minigrad=True)
 
-    def metatrain(self, env_samples, n_actors=5):
+    def metatrain(self, env_samples, n_actors=5, n_epochs=1):
         self.assign_old_network()
         self.param_network.set_weights(self.optim_param_net_wgt)
         self.log_sigma.assign(self.optim_log_sigma_wgt)
@@ -298,7 +299,7 @@ class Reptile:
         for batch_sample in batches:
             self.param_network.set_weights(self.optim_param_net_wgt)
             self.log_sigma.assign(self.optim_log_sigma_wgt)
-            _ = self.grad_loss(batch_sample, apply_minigrad=True)
+            _ = self.grad_loss(batch_sample, n_epochs=n_epochs, apply_minigrad=True)
 
             param_net_wgt = self.param_network.get_weights()
             log_sigma_wgt = self.log_sigma.numpy()
@@ -509,13 +510,14 @@ class Sampler:
 # meta_ppo_shared_invest_n  : random (** learned)
 def main():
     # model_name = 'meta_ppo_shared_invest_singletest_n'
-    model_name = 'meta_ppo_shared_invest_n_small'
+    today_ = datetime.now().strftime('%Y%m%d')
+    model_name = 'meta_ppo_shared_invest_n_take2'
     f_name = './{}.pkl'.format(model_name)
     ENVIRONMENT = 'PortfolioEnv'
 
     if ENVIRONMENT == 'PortfolioEnv':
-        env = PortfolioEnv(trading_cost=0.0, input_window_length=30)
-        main_env = PortfolioEnv(trading_cost=0.0, input_window_length=30)
+        env = PortfolioEnv(trading_cost=0.002, input_window_length=250)
+        main_env = PortfolioEnv(trading_cost=0.002, input_window_length=250)
 
     TIMESTAMP = datetime.now().strftime('%Y%m%d-%H%M%S')
     SUMMARY_DIR = os.path.join('./', 'PPO', ENVIRONMENT, TIMESTAMP)
@@ -531,8 +533,8 @@ def main():
     if os.path.exists(f_name):
         model.load_model(f_name)
 
-    n_envs = 1
-    initial_t = 120      # 최초 랜덤선택을 위한 길이
+    n_envs = 8
+    initial_t = 500      # 최초 랜덤선택을 위한 길이
     t_start = initial_t + M + K
 
     T = env.len_timeseries
@@ -542,23 +544,25 @@ def main():
     # for t_step, t in enumerate(range(t_start, T - test_length, test_length)):
     for t_step, t in enumerate(range(t_start, t_start + 1)):
         print("t: {}".format(t))
-        # env_samples = np.random.choice(M + np.arange(initial_t + t_step * test_length), n_envs, replace=True)
-        env_samples = np.array([300, 500])
+        env_samples = np.random.choice(M + np.arange(initial_t + t_step * test_length), n_envs, replace=True)
+        # env_samples = np.array([500])
 
         # train time
-        EP_MAX = 3000
+        EP_MAX = 10000
         for ep in range(EP_MAX + 1):
             s_train = time.time()
-            model.metatrain(env_samples, n_actors=10)
+            model.metatrain(env_samples, n_actors=5, n_epochs=3)
             e_train = time.time()
             print("[TRAIN] t: {} / ep: {} ({} sec per ep)".format(t, ep, e_train - s_train))
             if ep % 5 == 0:
                 print('model saved. ({})'.format(f_name))
                 model.save_model(f_name)
 
-            if ep % 20 == 0:
+            if ep % 10 == 0:
                 for j in range(len(env_samples)):
-                    model.fast_train(env_samples[j:(j+1)], n_actors=5)
+                    model.param_network.set_weights(model.optim_param_net_wgt)
+                    model.log_sigma.assign(model.optim_log_sigma_wgt)
+                    model.fast_train(env_samples[j:(j+1)], n_actors=5, n_epochs=3)
                     s_temp = env.reset(env_samples[j:(j+1)])
                     for n in range(K):
                         s_test = time.time()
@@ -566,7 +570,9 @@ def main():
                         s_temp, r_temp, _, done_temp = env.step(model.action_to_constrained_weight(a_temp))
                         e_test = time.time()
 
-                    img_path = ".//img//{}//".format(j)
+                        if done_temp:
+                            break
+                    img_path = ".//img//{}_{}//{}//".format(today_, model_name, j)
                     if not os.path.exists(img_path):
                         os.makedirs(img_path)
 
@@ -574,15 +580,20 @@ def main():
 
             if ep % 50 == 0:
                 for j in range(len(env_samples)):
-                    model.fast_train(env_samples[j], n_fast_train=1, n_tr_samples=20)
-                    s_temp = env.reset(env_samples[j])
+                    model.param_network.set_weights(model.optim_param_net_wgt)
+                    model.log_sigma.assign(model.optim_log_sigma_wgt)
+                    model.fast_train(env_samples[j:(j+1)], n_actors=10, n_epochs=3)
+                    s_temp = env.reset(env_samples[j:(j+1)])
                     for n in range(K):
                         s_test = time.time()
                         a_temp, v_temp = model.evaluate_state(s_temp, stochastic=False)
                         s_temp, r_temp, _, done_temp = env.step(model.action_to_constrained_weight(a_temp))
                         e_test = time.time()
 
-                    img_path = ".//img//test//{}//".format(j)
+                        if done_temp:
+                            break
+
+                    img_path = ".//img//{}_{}//test//{}//".format(today_, model_name, j)
                     if not os.path.exists(img_path):
                         os.makedirs(img_path)
 
