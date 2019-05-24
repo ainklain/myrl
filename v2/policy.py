@@ -21,7 +21,7 @@ EP_MAX = 1000
 GAMMA = 0.99
 LAMBDA = 0.95
 ENTROPY_BETA = 0.01
-LR = 0.001
+LR = 0.01
 META_LR = 0.001
 # BATCH = 8192
 BATCH = 512
@@ -120,7 +120,7 @@ class FeatureNetwork(Model):
 
 
 class ParamNetwork(Model):
-    def __init__(self, a_dim, dim_hidden=[64, 32, 16]):
+    def __init__(self, a_dim, dim_hidden=[128, 64, 32]):
         super(ParamNetwork, self).__init__()
         self.feature_net = FeatureNetwork()
         self.dim_hidden = dim_hidden
@@ -151,7 +151,7 @@ class ParamNetwork(Model):
 
 
 class Reptile:
-    def __init__(self, env, M=256, K=128):
+    def __init__(self, env, M=256):
         self.discrete = False
         self.s_dim = env.observation_space.shape
         if len(env.observation_space.shape) > 0:
@@ -175,7 +175,6 @@ class Reptile:
         self.sampler = Sampler(env)
 
         self.M = M
-        self.K = K
 
         self.global_step = 0
         self._initialize(env.reset())
@@ -508,34 +507,37 @@ class Sampler:
 # meta_ppo_model_shared_invest_singletest_n : 268, 300 test (action only and loss, n_train=n)
 # meta_ppo_shared_invest_singletest_n : 268 test (only fast_train (n=100))
 # meta_ppo_shared_invest_n  : random (** learned)
+# meta_ppo_shared_invest_n_take2: model[64, 32, 16] M/K=128, n_envs=8,  n_actors=5
 def main():
+    M = 128     # support set 길이
+    K = 128     # target set 길이
+    n_envs = 4
+    n_actors = 50
+    n_epochs = 3
     # model_name = 'meta_ppo_shared_invest_singletest_n'
     today_ = datetime.now().strftime('%Y%m%d')
-    model_name = 'meta_ppo_shared_invest_n_take2'
+    model_name = 'meta_ppo_M{}_K{}_ENV{}_ACT{}_EP{}'.format(M, K, n_envs, n_actors, n_epochs)
     f_name = './{}.pkl'.format(model_name)
     ENVIRONMENT = 'PortfolioEnv'
 
     if ENVIRONMENT == 'PortfolioEnv':
-        env = PortfolioEnv(trading_cost=0.002, input_window_length=250)
-        main_env = PortfolioEnv(trading_cost=0.002, input_window_length=250)
+        env = PortfolioEnv(trading_cost=0.002, input_window_length=128)
+        main_env = PortfolioEnv(trading_cost=0.002, input_window_length=128)
 
     TIMESTAMP = datetime.now().strftime('%Y%m%d-%H%M%S')
     SUMMARY_DIR = os.path.join('./', 'PPO', ENVIRONMENT, TIMESTAMP)
 
     # BATCH = 128
-    M = 128     # support set 길이
-    K = 128     # target set 길이
     test_length = 20
-    model = Reptile(env, M=M, K=K)
+    model = Reptile(env, M=M)
     # model = MetaPPO(env, M=M, K=K)
 
     # time.sleep(1)
     if os.path.exists(f_name):
         model.load_model(f_name)
 
-    n_envs = 8
     initial_t = 500      # 최초 랜덤선택을 위한 길이
-    t_start = initial_t + M + K
+    t_start = initial_t + M
 
     T = env.len_timeseries
     t = t_start
@@ -545,13 +547,13 @@ def main():
     for t_step, t in enumerate(range(t_start, t_start + 1)):
         print("t: {}".format(t))
         env_samples = np.random.choice(M + np.arange(initial_t + t_step * test_length), n_envs, replace=True)
-        # env_samples = np.array([500])
+        # env_samples = np.array([440, 114, 339, 411]) + 64 # M64 K64 env4 act50 epo3
 
         # train time
         EP_MAX = 10000
         for ep in range(EP_MAX + 1):
             s_train = time.time()
-            model.metatrain(env_samples, n_actors=5, n_epochs=3)
+            model.metatrain(env_samples, n_actors=n_actors, n_epochs=n_epochs)
             e_train = time.time()
             print("[TRAIN] t: {} / ep: {} ({} sec per ep)".format(t, ep, e_train - s_train))
             if ep % 5 == 0:
@@ -562,12 +564,12 @@ def main():
                 for j in range(len(env_samples)):
                     model.param_network.set_weights(model.optim_param_net_wgt)
                     model.log_sigma.assign(model.optim_log_sigma_wgt)
-                    model.fast_train(env_samples[j:(j+1)], n_actors=5, n_epochs=3)
-                    s_temp = env.reset(env_samples[j:(j+1)])
-                    for n in range(K):
+                    model.fast_train(env_samples[j:(j+1)], n_actors=n_actors, n_epochs=n_epochs)
+                    s_temp = main_env.reset(env_samples[j:(j+1)], n_actors=1)
+                    for k in range(K):
                         s_test = time.time()
                         a_temp, v_temp = model.evaluate_state(s_temp, stochastic=True)
-                        s_temp, r_temp, _, done_temp = env.step(model.action_to_constrained_weight(a_temp))
+                        s_temp, r_temp, _, done_temp = main_env.step(model.action_to_constrained_weight(a_temp))
                         e_test = time.time()
 
                         if done_temp:
@@ -576,19 +578,22 @@ def main():
                     if not os.path.exists(img_path):
                         os.makedirs(img_path)
 
-                    env.render(statistics=True, save_filename=img_path + "ep_{}_envt_{}.png".format(0 + ep, env_samples[j]))
+                    main_env.render(statistics=True, save_filename=img_path + "ep_{}_envt_{}.png".format(0 + ep, env_samples[j]))
 
             if ep % 50 == 0:
                 for j in range(len(env_samples)):
-                    model.param_network.set_weights(model.optim_param_net_wgt)
-                    model.log_sigma.assign(model.optim_log_sigma_wgt)
-                    model.fast_train(env_samples[j:(j+1)], n_actors=10, n_epochs=3)
-                    s_temp = env.reset(env_samples[j:(j+1)])
-                    for n in range(K):
+                    s_temp = main_env.reset(env_samples[j:(j+1)], n_actors=1)
+                    for k in range(K):
+                        if k % 5 == 0:
+                            model.param_network.set_weights(model.optim_param_net_wgt)
+                            model.log_sigma.assign(model.optim_log_sigma_wgt)
+                            model.fast_train(env_samples[j:(j+1)] + k, n_actors=n_actors, n_epochs=n_epochs)
+
                         s_test = time.time()
                         a_temp, v_temp = model.evaluate_state(s_temp, stochastic=False)
-                        s_temp, r_temp, _, done_temp = env.step(model.action_to_constrained_weight(a_temp))
+                        s_temp, r_temp, _, done_temp = main_env.step(model.action_to_constrained_weight(a_temp))
                         e_test = time.time()
+                        print("action_mu:{}".format(a_temp.numpy()))
 
                         if done_temp:
                             break
@@ -597,7 +602,7 @@ def main():
                     if not os.path.exists(img_path):
                         os.makedirs(img_path)
 
-                    env.render(statistics=True, save_filename=img_path + "ep_{}_envt_{}.png".format(0 + ep, env_samples[j]))
+                    main_env.render(statistics=True, save_filename=img_path + "ep_{}_envt_{}.png".format(0 + ep, env_samples[j]))
 
         # test time
         test_buffer_r = []
@@ -890,7 +895,7 @@ def test():
     if os.path.exists(f_name):
         model.load_model(f_name)
 
-    n_envs = 1
+    n_envs = 4
     initial_t = 120      # 최초 랜덤선택을 위한 길이
     t_start = initial_t + M + K
 
@@ -900,7 +905,7 @@ def test():
 
     for ep in range(1000):
         for _ in range(5):
-            model.fast_train(500+M, n_fast_train=1, n_tr_samples=5)
+            model.fast_train(500+M, n_fast_train=1, n_tr_samples=20)
             model.update_optim()
 
         s_temp = env.reset(t0=[300, 500], n_actors=5)
